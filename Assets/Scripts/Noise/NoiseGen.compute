@@ -1,0 +1,131 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture3D<float4> Result;
+
+float Resolution;
+float4 Points[512];
+int PointCount;
+
+float3 Worley(float3 pos){
+    float d = -1;
+    for (int i = 0; i < PointCount; i++ )
+    {
+        float3 p = float3(Points[i].x, Points[i].y, Points[i].z);
+        for (int px = -1; px <= 1; px++)
+        {
+            for (int py = -1; py <= 1; py++)
+            {
+                for (int pz = -1; pz <= 1; pz++)
+                {
+                    float temp = distance(float3(p.x - px, p.y - py, p.z - pz),float3(pos.x,pos.y,pos.z));
+                    if (d == -1 || temp < d) d = temp;
+                }
+            }
+        }
+    }
+    float4 color = float4(d,0.0,0.0, 1.0);
+    return color;
+}
+
+float smoothstep(float x)
+{
+    return 6 * pow(x, 5) - 15 * pow(x, 4) + 10 * pow(x, 3);
+}
+
+// t is the current x, y, or z value, a is the first value and b is the second value.
+float customLerp(float t, float a, float b)
+{
+    return a + smoothstep(frac(t)) * (b - a);
+}
+
+float3 hash33(int3 p)
+{
+    uint3 q = uint3(p.x * 1597334673, p.y * 3812015801, p.z * 2798796415);
+    q = uint3(q.x ^ q.y, q.y ^ q.z, q.z ^ q.x);
+    q = q * uint3(1597334673, 3812015801, 2798796415);
+    return float3(q) / 4294967295.0 * 2.0 - 1.0; // return -1 to 1 directly
+}
+
+float Perlin(float3 pos, float freq)
+{
+    float3 p = pos * freq;
+    float3 pmin = floor(p);
+    float3 pmax = pmin + 1;
+    
+    float3 vectors[8], hVectors[8];
+    float vectorDotValues[8];
+    
+    vectors[0] = float3(pmin.x,pmin.y,pmin.z); //000
+    vectors[1] = float3(pmin.x,pmin.y,pmax.z); //001
+    vectors[2] = float3(pmin.x,pmax.y,pmin.z); //010
+    vectors[3] = float3(pmin.x,pmax.y,pmax.z); //011
+    vectors[4] = float3(pmax.x,pmin.y,pmin.z); //100
+    vectors[5] = float3(pmax.x,pmin.y,pmax.z); //101
+    vectors[6] = float3(pmax.x,pmax.y,pmin.z); //110
+    vectors[7] = float3(pmax.x,pmax.y,pmax.z); //111
+    
+    for (int i = 0; i < 8; i++)
+    {
+        hVectors[i] = normalize(hash33((int3)vectors[i] % freq));
+        float3 cVector = p - vectors[i];
+        vectorDotValues[i] = dot(hVectors[i], cVector);
+    }
+    
+    float x0, x1, x2, x3, y0, y1, value;
+    x0 = customLerp(p.x, vectorDotValues[0], vectorDotValues[4]);
+    x1 = customLerp(p.x, vectorDotValues[2], vectorDotValues[6]);
+    x2 = customLerp(p.x, vectorDotValues[1], vectorDotValues[5]);
+    x3 = customLerp(p.x, vectorDotValues[3], vectorDotValues[7]);
+    
+    y0 = customLerp(p.y, x0, x1);
+    y1 = customLerp(p.y, x2, x3);
+    
+    value = customLerp(p.z, y0, y1);
+    
+    return value;
+}
+
+float MultPerlin(float3 pos)
+{
+    float value = 0;
+    float amplitude = 0.5;
+    float frequency = 2.0;
+    float sum = 0;
+    
+    for (int i = 0; i < 5; i++)
+    {
+        value += Perlin(pos, frequency) * amplitude;
+        sum += amplitude;
+        amplitude *= 0.5;
+        frequency *= 2;
+    }
+    value /= sum;
+    return saturate(value * 2.5 + 0.5);
+}
+
+float remap(float v, float inMin, float inMax, float outMin, float outMax)
+{
+    return outMin + (v - inMin) / (inMax - inMin) * (outMax - outMin);
+}
+
+[numthreads(8,8,8)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    float d = -1;
+    float x = (float)id.x / Resolution;
+    float y = (float)id.y / Resolution;
+    float z = (float)id.z / Resolution;
+    
+    float3 color = Worley(float3(x,y,z));
+    color.g = MultPerlin(float3(x,y,z));
+    color.b = saturate(remap(color.g, 0.0, 1.0, color.r, 1.0));
+      
+    Result[id.xyz] = float4(color,1.0); 
+}
+
+
+
+
