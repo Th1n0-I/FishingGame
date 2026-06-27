@@ -4,42 +4,23 @@
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
 RWTexture2D<float4> Result;
+Texture3D<float4> NoiseTex;
+Texture2D<float4> DepthTex;
+SamplerState sampler_DepthTex;
 
-float _StartDistance;
-float _MaxDistance;
-float _StepSize;
-float _DensityMultiplier;
-float _NoiseOffset;
-float _NoiseTiling;
-float _DensityThreshold;
-float _FogHeightCutoff;
-float _HeightCutoffSoftness;
-float _LightScattering;
-            
-float _NoiseSize1;
-float _NoiseSize2;
-float _NoiseSize3;
-float _NoiseWeight1;
-float _NoiseWeight2;
-float _NoiseWeight3;
-float _NoiseSpeed1x;
-float _NoiseSpeed1z;
-float _NoiseSpeed2x;
-float _NoiseSpeed2z;
-float _NoiseSpeed3x;
-float _NoiseSpeed3z;
+int TextureDivide;
 
-float4 _Color;
-float4 _LightContribution;
-
-float3 cameraPos;
-            
-
+int ScreenWidth;
+int ScreenHeight;
 
 [numthreads(8,8,1)]
 void CSMain (uint3 id : SV_DispatchThreadID)
 {
-    // TODO: insert actual code here!
-
-    Result[id.xy] = float4(id.x & id.y, (id.x & 15)/15.0, (id.y & 15)/15.0, 0.0);
+    int x = id.x * TextureDivide;
+    int y = id.y * TextureDivide;
+    id = uint3(x, y, 0);
+    float2 uv = float2(x / ScreenWidth, y / ScreenHeight);
+    float depth = DepthTex.SampleLevel(sampler_DepthTex, uv, 0);
+    
+    Result[id.xy/2] = float4(depth*100000, depth, depth, 1.0);
 }
