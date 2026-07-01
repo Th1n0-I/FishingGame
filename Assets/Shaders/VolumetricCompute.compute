@@ -13,14 +13,25 @@ int TextureDivide;
 int ScreenWidth;
 int ScreenHeight;
 
+float4x4 _InvVP;
+
+float3 calculateWorldPos(float2 uv, float depth)
+{
+    float4 ndc = float4(uv * 2.0 - 1.0, depth, 1.0);
+    float4 worldPos = mul(_InvVP, ndc);
+    return worldPos.xyz / worldPos.w;
+}
+
 [numthreads(8,8,1)]
 void CSMain (uint3 id : SV_DispatchThreadID)
 {
     int x = id.x * TextureDivide;
     int y = id.y * TextureDivide;
-    id = uint3(x, y, 0);
-    float2 uv = float2(x / ScreenWidth, y / ScreenHeight);
-    float depth = DepthTex.SampleLevel(sampler_DepthTex, uv, 0);
+    float2 uv = float2((float)x / ScreenWidth, (float)y / ScreenHeight);
     
-    Result[id.xy/2] = float4(depth*100000, depth, depth, 1.0);
+    
+    float depth = DepthTex.SampleLevel(sampler_DepthTex, uv, 0);
+    float3 worldPos = calculateWorldPos(uv, depth);
+    
+    Result[id.xy] = float4(worldPos.x / 100, 0.0, 0.0, 1.0);
 }

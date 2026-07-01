@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using GrayWolf.GPUInstancing.Domain;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Serialization;
@@ -20,11 +21,11 @@ public class NoiseController : MonoBehaviour {
 	private RawImage rawImage;
 
 	private void OnEnable() {
-		RenderPipelineManager.endContextRendering += OnEndFrameRendering;
+		RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
 	}
 
 	private void OnDisable() {
-		RenderPipelineManager.endContextRendering -= OnEndFrameRendering;
+		RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
 	}
 
 	private void Start() {
@@ -87,16 +88,25 @@ public class NoiseController : MonoBehaviour {
 		}
 	}
 
-	private void OnEndFrameRendering(ScriptableRenderContext context, List<Camera> cams) {
+	private void OnEndCameraRendering(ScriptableRenderContext context, Camera cam) {
 
-		var tex = Shader.GetGlobalTexture("_CameraDepthTexture");
-		Debug.Log(tex);
-		volumetricsShader.SetTexture(0, "DepthTex", tex);
-		volumetricsShader.Dispatch(0,volumetricsRenderTexture.width / 8, volumetricsRenderTexture.height / 8, 1);
+		if (cam != Camera.main) return;
 
-		if (onRawImage) {
-			rawImage.texture = volumetricsRenderTexture;
-			rawImage.texture = Shader.GetGlobalTexture("_CameraDepthTexture");
+		var depthTex = PersistentDepthFeature.PersistentDepthTexture;
+
+		if (depthTex != null && depthTex.rt != null) {
+			volumetricsShader.SetTexture(0, "DepthTex", depthTex.rt);
+			
+			
+			var proj = GL.GetGPUProjectionMatrix(cam.projectionMatrix, true);
+			var vp = proj * cam.worldToCameraMatrix;
+			volumetricsShader.SetMatrix("_InvVP", vp.inverse);
+			
+			volumetricsShader.Dispatch(0, volumetricsRenderTexture.width / 8, volumetricsRenderTexture.height / 8, 1);
+			
+			if (onRawImage) {
+				rawImage.texture = volumetricsRenderTexture;
+			}
 		}
 	}
 }

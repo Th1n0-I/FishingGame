@@ -20,6 +20,23 @@ MonoBehaviour:
   passIndex: 0
   bindDepthStencilAttachment: 0
   m_Version: 1
+--- !u!114 &-364805358206156276
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a2c174e7c5d0e3e4990380abc9994c8a, type: 3}
+  m_Name: OutputTextureRendererFeature
+  m_EditorClassIdentifier: Assembly-CSharp::OutputTextureRendererFeature
+  m_Active: 1
+  m_PassEvent: 500
+  m_TextureName: _InputTexture
+  m_TextureType: 0
+  m_Material: {fileID: 0}
 --- !u!114 &11400000
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -47,7 +64,8 @@ MonoBehaviour:
   m_RendererFeatures:
   - {fileID: 7000221464503203852}
   - {fileID: -3894588853009906930}
-  m_RendererFeatureMap: 0c38c74c55c825610e03269612a4f3c9
+  - {fileID: 4502999500330803447}
+  m_RendererFeatureMap: 0c38c74c55c825610e03269612a4f3c9f7a0fa0830de7d3e
   m_UseNativeRenderPass: 1
   xrSystemData: {fileID: 0}
   postProcessData: {fileID: 11400000, guid: 41439944d30ece34e96484bdb6645b55, type: 2}
@@ -76,6 +94,20 @@ MonoBehaviour:
   m_DepthTextureFormat: 0
   m_AccurateGbufferNormals: 0
   m_IntermediateTextureMode: 0
+--- !u!114 &4502999500330803447
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6ccfae5401c97ac46ba6989c638edc40, type: 3}
+  m_Name: ShaderHandler
+  m_EditorClassIdentifier: Assembly-CSharp::ShaderHandler
+  m_Active: 1
+  renderPassEvent: 300
 --- !u!114 &7000221464503203852
 MonoBehaviour:
   m_ObjectHideFlags: 0

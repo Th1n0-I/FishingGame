@@ -110,7 +110,7 @@ Material:
     - _ClearCoatSmoothness: 0
     - _Cull: 2
     - _Cutoff: 0.5
-    - _DensityMultiplier: 0.108
+    - _DensityMultiplier: 0.13
     - _DensityThreshold: 0.137
     - _DetailAlbedoMapScale: 1
     - _DetailNormalMapScale: 1
@@ -122,10 +122,10 @@ Material:
     - _Glossiness: 0
     - _GlossyReflections: 0
     - _HeightCutoffSoftness: 9.44
-    - _LightScattering: 0.998
-    - _MaxDistance: 152
+    - _LightScattering: 0.834
+    - _MaxDistance: 232
     - _Metallic: 0
-    - _NoiseOffset: 10.44
+    - _NoiseOffset: 0
     - _NoiseSize: 34.28
     - _NoiseSize1: 856
     - _NoiseSize2: 312
@@ -154,8 +154,8 @@ Material:
     - _SpecularHighlights: 1
     - _SrcBlend: 1
     - _SrcBlendAlpha: 1
-    - _StartDistance: 441
-    - _StepSize: 9.3
+    - _StartDistance: 473
+    - _StepSize: 3.76
     - _Surface: 0
     - _WorkflowMode: 1
     - _XRMotionVectorsPass: 1
@@ -164,7 +164,7 @@ Material:
     - _BaseColor: {r: 1, g: 1, b: 1, a: 1}
     - _Color: {r: 1, g: 1, b: 1, a: 1}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
-    - _LightContribution: {r: 0.25, g: 0.25, b: 0.25, a: 1}
+    - _LightContribution: {r: 1, g: 1, b: 1, a: 1}
     - _SpecColor: {r: 0.19999996, g: 0.19999996, b: 0.19999996, a: 1}
   m_BuildTextureStacks: []
   m_AllowLocking: 1
