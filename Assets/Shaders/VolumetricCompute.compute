@@ -5,6 +5,8 @@
 // with cs.SetTexture
 RWTexture2D<float4> Result;
 Texture3D<float4> NoiseTex;
+SamplerState sampler_NoiseTex;
+
 Texture2D<float4> DepthTex;
 SamplerState sampler_DepthTex;
 
@@ -14,6 +16,59 @@ int ScreenWidth;
 int ScreenHeight;
 
 float4x4 _InvVP;
+
+float PI = 3.14159265358979323846;
+
+float _Time;
+float _DensityMultiplier;
+float _DensityThreshold;
+float _LightScattering;
+float _StepSize;
+float _NoiseSize;
+float _MaxDistance;
+
+float _YMin;
+float _YMax;
+
+float4 _CamPos;
+float4 _FogColor;
+float4 _MainLightColor;
+float4 _LightDirection;
+float4 _LightContribution;
+
+float IGN(float2 p)
+{
+    float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
+    return frac( magic.z * frac(dot(p,magic.xy)) );
+}
+
+
+float HenyeyGreenstein(float g, float costh)
+{
+    return (1.0 - g * g) / (4.0 * PI * pow(1.0 + g * g - 2.0 * g * costh, 3.0/2.0));
+}
+
+float get_density(float3 worldPos)
+{
+    float t = _Time;
+    /*float d = SAMPLE_TEXTURE3D(_NoiseTex, sampler_NoiseTex, float3(
+        (worldPos.x + _NoiseSpeed1x * t) / _NoiseSize1,
+        (worldPos.z + _NoiseSpeed1z * t) / _NoiseSize1,
+        worldPos.y / _NoiseSize1)).b * _DensityMultiplier * _NoiseWeight1;
+    d += SAMPLE_TEXTURE3D(_NoiseTex, sampler_NoiseTex, float3(
+        (worldPos.x + _NoiseSpeed2x * t) / _NoiseSize2,
+        (worldPos.z + _NoiseSpeed2z * t) / _NoiseSize2,
+        worldPos.y / _NoiseSize2)).b * _DensityMultiplier * _NoiseWeight2;
+    d += SAMPLE_TEXTURE3D(_NoiseTex, sampler_NoiseTex, float3(
+        (worldPos.x + _NoiseSpeed3x * t) / _NoiseSize3,
+        (worldPos.z + _NoiseSpeed3z * t) / _NoiseSize3,
+        worldPos.y / _NoiseSize3)).b * _DensityMultiplier * _NoiseWeight3;*/
+    float d = NoiseTex.SampleLevel(sampler_NoiseTex, worldPos / _NoiseSize, 0).b * _DensityMultiplier / 2;
+    d += NoiseTex.SampleLevel(sampler_NoiseTex, worldPos / _NoiseSize * 5, 0).b * _DensityMultiplier / 4;
+    d += NoiseTex.SampleLevel(sampler_NoiseTex, worldPos / _NoiseSize * 10, 0).b * _DensityMultiplier / 8;
+    if (d < _DensityThreshold) return 0;
+    return d;
+}
 
 float3 calculateWorldPos(float2 uv, float depth)
 {
@@ -28,10 +83,41 @@ void CSMain (uint3 id : SV_DispatchThreadID)
     int x = id.x * TextureDivide;
     int y = id.y * TextureDivide;
     float2 uv = float2((float)x / ScreenWidth, (float)y / ScreenHeight);
+    float3 fogColor = _FogColor.rgb;
     
     
-    float depth = DepthTex.SampleLevel(sampler_DepthTex, uv, 0);
+    float depth = DepthTex.SampleLevel(sampler_DepthTex, uv, 0).r;
     float3 worldPos = calculateWorldPos(uv, depth);
+    float3 entryPos = _CamPos.xyz;
+    float3 viewDir = worldPos - entryPos;
+    float viewLength = length(viewDir);
+    float3 rayDir = normalize(viewDir);
     
-    Result[id.xy] = float4(worldPos.x / 100, 0.0, 0.0, 1.0);
+    float distLimit = min(viewLength, _MaxDistance);
+    float distTravelled = IGN(id.xy);
+    float transmittance = 1;
+    int steps = 0;
+    
+    [loop]
+    while (distTravelled < distLimit && transmittance > 0.01)
+    {
+        float3 rayPos = entryPos + rayDir * distTravelled;
+        
+        if (rayPos.y > _YMin && rayPos.y < _YMax)
+        {
+            float density = get_density(rayPos);
+            if (density > 0)
+            {
+                fogColor.rgb += _MainLightColor.rgb * _LightContribution.rgb * HenyeyGreenstein(_LightScattering, dot(rayDir, _LightDirection.xyz)) * density * _StepSize;
+                transmittance *= exp(-density * _StepSize);
+            }
+        }
+        distTravelled += _StepSize;
+        steps++;
+    }
+    
+    Result[id.xy] = float4(saturate(fogColor.rgb), 1.0 - saturate(transmittance));
+    
+ 
+    
 }
