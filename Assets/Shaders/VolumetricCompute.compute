@@ -10,6 +10,9 @@ SamplerState sampler_NoiseTex;
 Texture2D<float4> DepthTex;
 SamplerState sampler_DepthTex;
 
+Texture2D<float4> _VolumetricsGradient;
+SamplerState sampler_VolumetricsGradient;
+
 int TextureDivide;
 
 int ScreenWidth;
@@ -26,15 +29,31 @@ float _LightScattering;
 float _StepSize;
 float _NoiseSize;
 float _MaxDistance;
+float _ShadowDensity;
+float _Gradient;
 
-float _YMin;
-float _YMax;
+int _StepAmount;
+
+bool _UseStepSize;
 
 float4 _CamPos;
 float4 _FogColor;
 float4 _MainLightColor;
 float4 _LightDirection;
 float4 _LightContribution;
+float4 _MinBounds;
+float4 _MaxBounds;
+
+float2 GetBounds(float3 worldPos, float3 rayDir)
+{
+    float3 tl = float3((_MinBounds.x - worldPos.x) / rayDir.x, (_MinBounds.y - worldPos.y) / rayDir.y, (_MinBounds.z - worldPos.z) / rayDir.z);
+    float3 th = float3((_MaxBounds.x - worldPos.x) / rayDir.x, (_MaxBounds.y - worldPos.y) / rayDir.y, (_MaxBounds.z - worldPos.z) / rayDir.z);
+    
+    float tc = max(min(tl.x, th.x), max(min(tl.y, th.y),min(tl.z, th.z)));
+    float tf = min(max(tl.x, th.x), min(max(tl.y, th.y),max(tl.z, th.z)));
+    
+    return float2(tc,tf);
+}
 
 float IGN(float2 p)
 {
@@ -45,7 +64,7 @@ float IGN(float2 p)
 
 float HenyeyGreenstein(float g, float costh)
 {
-    return (1.0 - g * g) / (4.0 * PI * pow(1.0 + g * g - 2.0 * g * costh, 3.0/2.0));
+    return (1.0 - costh * costh) / (4.0 * 3.14 * pow(1.0 + g * g - (2.0 * g) * costh, 1.5f));
 }
 
 float get_density(float3 worldPos)
@@ -66,6 +85,7 @@ float get_density(float3 worldPos)
     float d = NoiseTex.SampleLevel(sampler_NoiseTex, worldPos / _NoiseSize, 0).b * _DensityMultiplier / 2;
     d += NoiseTex.SampleLevel(sampler_NoiseTex, worldPos / _NoiseSize * 5, 0).b * _DensityMultiplier / 4;
     d += NoiseTex.SampleLevel(sampler_NoiseTex, worldPos / _NoiseSize * 10, 0).b * _DensityMultiplier / 8;
+    d *= min((1-2*abs((worldPos.y - _MinBounds.y) / (_MaxBounds.y - _MinBounds.y) - 0.5)) * 1/_Gradient,1);
     if (d < _DensityThreshold) return 0;
     return d;
 }
@@ -94,29 +114,58 @@ void CSMain (uint3 id : SV_DispatchThreadID)
     float3 rayDir = normalize(viewDir);
     
     float distLimit = min(viewLength, _MaxDistance);
-    float distTravelled = IGN(id.xy);
     float transmittance = 1;
     int steps = 0;
     
+    float2 entryExit = GetBounds(entryPos, rayDir);
+    
+    float stepSize;
+    if (_UseStepSize) stepSize = _StepSize;
+    else stepSize = (entryExit.y - entryExit.x) / (float)_StepAmount;
+    
+    bool intersect = (entryExit.y > 0.0 && entryExit.x < entryExit.y);
+    
+    if (!intersect) Result[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+    float distTravelled;
+    if (entryExit.x > 0.0) distTravelled = entryExit.x + IGN(id.xy) * stepSize;
+    else distTravelled = IGN(id.xy) * stepSize;
+    
+    distLimit = min(distLimit, entryExit.y);
+    
     [loop]
-    while (distTravelled < distLimit && transmittance > 0.01)
+    while (((_UseStepSize && distTravelled < distLimit) || (!_UseStepSize && steps <= _StepAmount && distTravelled < distLimit)) && transmittance > 0.01 && intersect)
     {
         float3 rayPos = entryPos + rayDir * distTravelled;
         
-        if (rayPos.y > _YMin && rayPos.y < _YMax)
+        float density = get_density(rayPos);
+        if (density > 0)
         {
-            float density = get_density(rayPos);
-            if (density > 0)
+            float3 shadowRayDir = normalize(-_LightDirection.xyz);
+            float3 shadowRayEntryPos = rayPos + IGN(id.xy) * 0.1;
+            float shadowTransmittance = 1;
+            
+            for (int i = 1; i <= 6; i++)
             {
-                fogColor.rgb += _MainLightColor.rgb * _LightContribution.rgb * HenyeyGreenstein(_LightScattering, dot(rayDir, _LightDirection.xyz)) * density * _StepSize;
-                transmittance *= exp(-density * _StepSize);
+                float3 shadowRayPos = shadowRayEntryPos + shadowRayDir * i * 0.2;
+                float shadowDensity = get_density(shadowRayPos) * _ShadowDensity;
+                if (shadowDensity > 0)
+                {
+                    shadowTransmittance *= exp(-shadowDensity);
+                }
             }
+            
+            float d = density * stepSize;
+            float beer = exp(-d);
+            fogColor.rgb += transmittance * _MainLightColor.rgb * _LightContribution.rgb * HenyeyGreenstein(_LightScattering, dot(rayDir, normalize(_LightDirection.xyz))) * density * shadowTransmittance * stepSize;
+            transmittance *= beer;
         }
-        distTravelled += _StepSize;
+        distTravelled += stepSize;
         steps++;
     }
-    
-    Result[id.xy] = float4(saturate(fogColor.rgb), 1.0 - saturate(transmittance));
+    if (intersect)
+    {
+        Result[id.xy] = float4(fogColor.rgb, 1.0 - saturate(transmittance));
+    }
     
  
     

@@ -1,9 +1,11 @@
 using System.Collections.Generic;
 using GrayWolf.GPUInstancing.Domain;
+using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Serialization;
 using UnityEngine.UI;
+using Random = UnityEngine.Random;
 
 public class NoiseController : MonoBehaviour {
 
@@ -13,13 +15,19 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField] private float densityThreshold  = 1.0f;
 	[SerializeField] private float lightScattering   = 1.0f;
 	[SerializeField] private float stepSize          = 1.0f;
+	[SerializeField] private int stepAmount        = 1;
 	[SerializeField] private float noiseSize         = 1.0f;
 	[SerializeField] private float yMin              = 60;
 	[SerializeField] private float yMax              = 70;
 	[SerializeField] private float maxDist           = 100;
+	[SerializeField] private float shadowDensity     = 1.0f;
+	[SerializeField] private float gradient          = 0.2f;
+	[SerializeField] private bool useStepSize        = false;
 	[SerializeField] private Color fogColor;
 	[ColorUsage(true, true)]
 	[SerializeField] private Color lightContribution;
+	[SerializeField] private Texture2D volumetricsGradient;
+	[SerializeField] private Collider  bounds;
 	
 	[Header("Other")]
 	[SerializeField] private int seed = 0;
@@ -41,7 +49,7 @@ public class NoiseController : MonoBehaviour {
 
 	private void Start() {
 		
-		
+		Shader.SetGlobalTexture("_VolumetricsGradient", volumetricsGradient);
 		
 		noiseRenderTexture                   = new RenderTexture(128, 128, 0, RenderTextureFormat.ARGBFloat);
 		noiseRenderTexture.dimension         = UnityEngine.Rendering.TextureDimension.Tex3D;
@@ -53,6 +61,7 @@ public class NoiseController : MonoBehaviour {
 		volumetricsRenderTexture = new RenderTexture(Screen.width / textureDivide, Screen.height / textureDivide, 24, RenderTextureFormat.ARGBFloat);
 		volumetricsRenderTexture.enableRandomWrite = true;
 		volumetricsRenderTexture.wrapMode = TextureWrapMode.Repeat;
+		volumetricsRenderTexture.filterMode = FilterMode.Bilinear;
 		volumetricsRenderTexture.Create();
 		
 		
@@ -110,20 +119,29 @@ public class NoiseController : MonoBehaviour {
 			
 			volumetricsShader.SetTexture(0, "NoiseTex", noiseRenderTexture);
 			volumetricsShader.SetTexture(0, "DepthTex", depthTex.rt);
+			
 			volumetricsShader.SetVector("_CamPos", new Vector4(cam.transform.position.x, cam.transform.position.y, cam.transform.position.z, 0.0f));
 			volumetricsShader.SetVector("_FogColor", fogColor);
 			volumetricsShader.SetVector("_MainLightColor", sun.color);
 			volumetricsShader.SetVector("_LightDirection", sun.transform.forward);
 			volumetricsShader.SetVector("_LightContribution", lightContribution);
-			volumetricsShader.SetFloat("_Time", Time.time);
+			volumetricsShader.SetVector("_MinBounds", bounds.bounds.min);
+			volumetricsShader.SetVector("_MaxBounds", bounds.bounds.max);
+			volumetricsShader.SetFloat("_Time",              Time.time);
 			volumetricsShader.SetFloat("_DensityMultiplier", densityMultiplier);
-			volumetricsShader.SetFloat("_DensityThreshold", densityThreshold);
-			volumetricsShader.SetFloat("_LightScattering", lightScattering);
-			volumetricsShader.SetFloat("_StepSize", stepSize);
-			volumetricsShader.SetFloat("_NoiseSize", noiseSize);
-			volumetricsShader.SetFloat("_YMin", yMin);
-			volumetricsShader.SetFloat("_YMax", yMax);
-			volumetricsShader.SetFloat("_MaxDistance", maxDist);
+			volumetricsShader.SetFloat("_DensityThreshold",  densityThreshold);
+			volumetricsShader.SetFloat("_LightScattering",   lightScattering);
+			volumetricsShader.SetFloat("_StepSize",          math.max(0.1f, stepSize));
+			volumetricsShader.SetFloat("_NoiseSize",         noiseSize);
+			volumetricsShader.SetFloat("_YMin",              yMin);
+			volumetricsShader.SetFloat("_YMax",              yMax);
+			volumetricsShader.SetFloat("_MaxDistance",       maxDist);
+			volumetricsShader.SetFloat("_ShadowDensity",     shadowDensity);
+			volumetricsShader.SetFloat("_Gradient",          gradient);
+			
+			volumetricsShader.SetInt("_StepAmount",        math.min(math.max(stepAmount, 1),100));
+
+			volumetricsShader.SetBool("_UseStepSize", useStepSize);
 			
 			var proj = GL.GetGPUProjectionMatrix(cam.projectionMatrix, true);
 			var view = cam.worldToCameraMatrix;
