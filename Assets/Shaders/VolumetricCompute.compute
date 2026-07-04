@@ -64,7 +64,7 @@ float IGN(float2 p)
 
 float HenyeyGreenstein(float g, float costh)
 {
-    return (1.0 - costh * costh) / (4.0 * 3.14 * pow(1.0 + g * g - (2.0 * g) * costh, 1.5f));
+    return (1.0 - g * g) / (4.0 * 3.14 * pow(1.0 + g * g - (2.0 * g) * costh, 1.5f));
 }
 
 float get_density(float3 worldPos)
@@ -141,7 +141,7 @@ void CSMain (uint3 id : SV_DispatchThreadID)
         if (density > 0)
         {
             float3 shadowRayDir = normalize(-_LightDirection.xyz);
-            float3 shadowRayEntryPos = rayPos + IGN(id.xy) * 0.1;
+            float3 shadowRayEntryPos = rayPos + IGN(id.xy);
             float shadowTransmittance = 1;
             
             for (int i = 1; i <= 6; i++)
@@ -156,7 +156,7 @@ void CSMain (uint3 id : SV_DispatchThreadID)
             
             float d = density * stepSize;
             float beer = exp(-d);
-            fogColor.rgb += transmittance * _MainLightColor.rgb * _LightContribution.rgb * HenyeyGreenstein(_LightScattering, dot(rayDir, normalize(_LightDirection.xyz))) * density * shadowTransmittance * stepSize;
+            fogColor.rgb += transmittance * _MainLightColor.rgb * _LightContribution.rgb * HenyeyGreenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) * density * shadowTransmittance * stepSize;
             transmittance *= beer;
         }
         distTravelled += stepSize;
