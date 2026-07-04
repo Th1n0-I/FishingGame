@@ -1,16 +1,21 @@
+using System;
 using FishingGame;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
 namespace Player {
 	public class PlayerMovement : MonoBehaviour {
-		#region fields
+		#region Fields
+
+		private static DebugHandler Debug;
 
 		[Header("Settings")]
-		[SerializeField] private float movementSpeed;
+		[SerializeField] private float maxSpeed, acceleration;
+		[SerializeField] private float groundMaxDist;
 
-		//? Components
-		private Rigidbody rb;
+		[Header("Components")]
+		[SerializeField] private Transform groundCheckPosition;
+		private Rigidbody playerRb;
 
 		//? Inputs
 		private InputAction lookAction;
@@ -21,37 +26,69 @@ namespace Player {
 		private Vector3 lookVector;
 		private Vector3 velocity;
 
+		//? Move these states
+		private bool isGrounded;
+
 		#endregion
 
-		#region Unity functions
+		#region Unity Functions
+
+		[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+		private static void OnRuntimeInit() {
+			Debug = new DebugHandler("PlayerMovement");
+		}
 
 		private void Start() {
-			rb = GetComponent<Rigidbody>();
+			Debug ??= new DebugHandler("PlayerMovement");
+
+			playerRb = GetComponent<Rigidbody>();
 
 			moveAction = InputSystem.actions.FindAction("Move");
-			lookAction = InputSystem.actions.FindAction("Look");
 
 			Cursor.lockState = CursorLockMode.Locked;
 		}
 
+		private void Update() {
+			CheckGround();
+		}
 
-		private void Update() => CheckPlayerInputs();
+		private void FixedUpdate() {
+			PerformMove();
+		}
+
+		private void OnDrawGizmos() {
+			//? Ground Check
+			Gizmos.color = Lib.Movement.GroundCheck(groundCheckPosition.position, groundMaxDist)
+				               ? Color.green
+				               : Color.red;
+			Gizmos.DrawWireSphere(groundCheckPosition.position, groundMaxDist);
+		}
 
 		#endregion
 
-		#region custom functions
+		#region Functions
 
-		private void CheckPlayerInputs() {
-			lookVector            =  lookAction.ReadValue<Vector2>();
-			transform.eulerAngles += new Vector3(0, lookVector.x, 0) * Preferences.Input.MouseSensitivity;
+		private void CheckGround() => isGrounded = Lib.Movement.GroundCheck(transform.position, groundMaxDist);
 
 
-			moveVector = moveAction.ReadValue<Vector2>();
-			velocity.x = (moveVector.y * transform.forward.x + moveVector.x * transform.right.x) * movementSpeed;
-			velocity.z = (moveVector.y * transform.forward.z + moveVector.x * transform.right.z) * movementSpeed;
-			velocity.y = rb.linearVelocity.y;
+		private void PerformMove() {
+			var inputVector   = moveAction.ReadValue<Vector2>();
+			var moveDirection = (transform.forward * inputVector.y + transform.right * inputVector.x).normalized;
 
-			rb.linearVelocity = velocity;
+			moveVector = moveDirection * maxSpeed;
+
+			var playerVelocity  = new Vector3(playerRb.linearVelocity.x, 0, playerRb.linearVelocity.z);
+			var speedDifference = moveVector - playerVelocity;
+			var finalForce      = speedDifference * acceleration;
+
+			playerRb.AddForce(finalForce, ForceMode.Force);
+
+			Debug.LogKv("PerformMove", DebugLevel.Debug, new object[] {
+				"moveVector", moveVector,
+				"playerVelocity", playerVelocity,
+				"speedDifference", speedDifference,
+				"finalForce", finalForce
+			});
 		}
 
 		#endregion

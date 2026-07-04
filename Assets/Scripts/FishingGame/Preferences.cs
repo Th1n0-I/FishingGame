@@ -21,7 +21,8 @@ namespace FishingGame {
 		}
 
 		public abstract class Input {
-			public static float MouseSensitivity = 0.1f;
+			public static float MouseSensitivity  = 0.1f;
+			public static float MoveInputDeadZone = 0.1f;
 		}
 	}
 }
