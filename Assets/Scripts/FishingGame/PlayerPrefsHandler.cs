@@ -165,8 +165,8 @@ namespace FishingGame {
 
 			//? Input
 			Preferences.Input.MouseSensitivity              = FBPP.GetFloat("MouseSensitivity", 0.1f);
-			cmInputAxisController.Controllers[0].Input.Gain = Preferences.Input.MouseSensitivity * 10;
-			cmInputAxisController.Controllers[1].Input.Gain = Preferences.Input.MouseSensitivity * 10;
+			// cmInputAxisController.Controllers[0].Input.Gain = Preferences.Input.MouseSensitivity * 10;
+			// cmInputAxisController.Controllers[1].Input.Gain = Preferences.Input.MouseSensitivity * 10;
 		}
 
 		#endregion
