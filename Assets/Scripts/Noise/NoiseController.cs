@@ -11,31 +11,36 @@ public class NoiseController : MonoBehaviour {
 
 	[Header("Volumetrics")]
 	[SerializeField] private int textureDivide = 2;
-	[SerializeField] private float densityMultiplier = 1.0f;
-	[SerializeField] private float densityThreshold  = 1.0f;
-	[SerializeField] private float lightScattering   = 1.0f;
-	[SerializeField] private float stepSize          = 1.0f;
-	[SerializeField] private int stepAmount        = 1;
-	[SerializeField] private float noiseSize         = 1.0f;
-	[SerializeField] private float yMin              = 60;
-	[SerializeField] private float yMax              = 70;
-	[SerializeField] private float maxDist           = 100;
-	[SerializeField] private float shadowDensity     = 1.0f;
-	[SerializeField] private float gradient          = 0.2f;
-	[SerializeField] private bool useStepSize        = false;
+	[SerializeField] private float densityMultiplier   = 1.0f;
+	[SerializeField] private float fbmMult             = 1.0f;
+	[SerializeField] private float densityThreshold    = 1.0f;
+	[SerializeField] private float lightScattering     = 1.0f;
+	[SerializeField] private float stepSize            = 1.0f;
+	[SerializeField] private int   firstPassStepAmount = 1;
+	[SerializeField] private int   stepAmount          = 1;
+	[SerializeField] private float noiseSize           = 1.0f;
+	[SerializeField] private float detailSize          = 1.0f;
+	[SerializeField] private float detailStrength      = 1.0f;
+	[SerializeField] private float yMin                = 60;
+	[SerializeField] private float yMax                = 70;
+	[SerializeField] private float maxDist             = 100;
+	[SerializeField] private float shadowDensity       = 1.0f;
+	[SerializeField] private float gradient            = 0.2f;
+	[SerializeField] private bool  firstPass           = false;
+	[SerializeField] private bool  useStepSize         = false;
 	[SerializeField] private Color fogColor;
 	[ColorUsage(true, true)]
 	[SerializeField] private Color lightContribution;
-	[SerializeField] private Texture2D volumetricsGradient;
+	[SerializeField] private Texture2D coverageTexture;
 	[SerializeField] private Collider  bounds;
 	
 	[Header("Other")]
 	[SerializeField] private int seed = 0;
-	[SerializeField] private ComputeShader noiseShader, volumetricsShader;
-	[SerializeField] private RenderTexture noiseRenderTexture, volumetricsRenderTexture;
-	[SerializeField] private bool onRawImage;
-	[SerializeField] private int  dotAmount;
-	[SerializeField, Range(0,1)] private float z;
+	[SerializeField]             private ComputeShader noiseShader,         volumetricsShader;
+	[SerializeField]         private RenderTexture perlinRenderTexture, worleyRenderTexture,volumetricsRenderTexture;
+	[SerializeField]             private bool          onRawImage;
+	[SerializeField]             private int           dotAmount;
+	[SerializeField, Range(0,1)] private float         z;
 	
 	private RawImage rawImage;
 
@@ -48,54 +53,48 @@ public class NoiseController : MonoBehaviour {
 	}
 
 	private void Start() {
+		perlinRenderTexture                   = new RenderTexture(128, 128, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+		perlinRenderTexture.dimension         = TextureDimension.Tex3D;
+		perlinRenderTexture.volumeDepth       = 128;
+		perlinRenderTexture.enableRandomWrite = true;
+		perlinRenderTexture.wrapMode = TextureWrapMode.Repeat;
+		perlinRenderTexture.Create();
 		
-		Shader.SetGlobalTexture("_VolumetricsGradient", volumetricsGradient);
+		worleyRenderTexture                   = new RenderTexture(32, 32, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+		worleyRenderTexture.dimension         = TextureDimension.Tex3D;
+		worleyRenderTexture.volumeDepth       = 32;
+		worleyRenderTexture.enableRandomWrite = true;
+		worleyRenderTexture.wrapMode          = TextureWrapMode.Repeat;
+		worleyRenderTexture.Create();
 		
-		noiseRenderTexture                   = new RenderTexture(128, 128, 0, RenderTextureFormat.ARGBFloat);
-		noiseRenderTexture.dimension         = UnityEngine.Rendering.TextureDimension.Tex3D;
-		noiseRenderTexture.volumeDepth       = 128;
-		noiseRenderTexture.enableRandomWrite = true;
-		noiseRenderTexture.wrapMode = TextureWrapMode.Repeat;
-		noiseRenderTexture.Create();
-		
-		volumetricsRenderTexture = new RenderTexture(Screen.width / textureDivide, Screen.height / textureDivide, 24, RenderTextureFormat.ARGBFloat);
+		volumetricsRenderTexture = new RenderTexture(Screen.width / textureDivide, Screen.height / textureDivide, 0, RenderTextureFormat.ARGBFloat);
 		volumetricsRenderTexture.enableRandomWrite = true;
 		volumetricsRenderTexture.wrapMode = TextureWrapMode.Repeat;
 		volumetricsRenderTexture.filterMode = FilterMode.Bilinear;
 		volumetricsRenderTexture.Create();
 		
+		noiseShader.SetTexture(0, "PerlinTex", perlinRenderTexture);
+		noiseShader.SetTexture(1, "WorleyTex", worleyRenderTexture);
 		
-		Vector3[] dots = new Vector3[dotAmount * dotAmount * dotAmount];
+		noiseShader.SetFloat("_WorleySize1", 8);
+		noiseShader.SetFloat("_WorleySize2", 8);
+		noiseShader.SetFloat("_WorleySize3", 16);
+		noiseShader.SetFloat("_WorleySize4", 8);
 		
-		Random.InitState(seed);
+		noiseShader.SetFloat("_PerlinSize1", 32);
+		noiseShader.SetFloat("_PerlinSize2", 64);
+		noiseShader.SetFloat("_PerlinSize3", 128);
+		noiseShader.SetFloat("_PerlinSize4", 16);
 		
-		for (int i = 0; i < dotAmount; i++) {
-			for (int j = 0; j < dotAmount; j++) {
-				for (int k = 0; k < dotAmount; k++) {
-					float r1, r2, r3;
-					r1                  = Random.value;
-					r2                  = Random.value;
-					r3                  = Random.value;
-					dots[i*dotAmount*dotAmount+j*dotAmount+k] = new Vector3(r1, r2, r3);
-				}
-			}
-		}
+		noiseShader.Dispatch(0, perlinRenderTexture.width / 8, perlinRenderTexture.height / 8, perlinRenderTexture.volumeDepth / 8);
+		noiseShader.Dispatch(1,worleyRenderTexture.width / 8, worleyRenderTexture.height / 8, worleyRenderTexture.volumeDepth / 8);
+		Shader.SetGlobalTexture("_PerlinTex", perlinRenderTexture);
+		Shader.SetGlobalTexture("_WorleyTex", worleyRenderTexture);
 		
-		Vector4[] longDots = new Vector4[dotAmount * dotAmount * dotAmount];
-
-		for (int i = 0; i < dotAmount * dotAmount * dotAmount; i++) {
-			longDots[i] = new Vector4(dots[i].x, dots[i].y ,dots[i].z,1);
-		}
-		
-		noiseShader.SetTexture(0, "Result", noiseRenderTexture);
-		noiseShader.SetFloat("Resolution", noiseRenderTexture.width);
-		noiseShader.SetVectorArray("Points", longDots);
-		noiseShader.SetInt("PointCount", dotAmount *  dotAmount);
-		noiseShader.Dispatch(0, noiseRenderTexture.width / 8, noiseRenderTexture.height / 8, noiseRenderTexture.volumeDepth / 8);
-		Shader.SetGlobalTexture("_NoiseTex", noiseRenderTexture);
-		
-		volumetricsShader.SetTexture(0, "NoiseTex", noiseRenderTexture);
-		volumetricsShader.SetTexture(0, "Result", volumetricsRenderTexture);
+		volumetricsShader.SetTexture(0, "_PerlinTex",       perlinRenderTexture);
+		volumetricsShader.SetTexture(0, "_WorleyTex",       worleyRenderTexture);
+		volumetricsShader.SetTexture(0, "Result",           volumetricsRenderTexture);
+		volumetricsShader.SetTexture(0, "_CoverageTexture", coverageTexture);
 		
 		Shader.SetGlobalTexture("_VolumetricsTex", volumetricsRenderTexture);
 		volumetricsShader.SetInt("TextureDivide", textureDivide);
@@ -117,7 +116,7 @@ public class NoiseController : MonoBehaviour {
 		if (depthTex != null && depthTex.rt != null) {
 			var sun = RenderSettings.sun;
 			
-			volumetricsShader.SetTexture(0, "NoiseTex", noiseRenderTexture);
+			volumetricsShader.SetTexture(0, "NoiseTex", perlinRenderTexture);
 			volumetricsShader.SetTexture(0, "DepthTex", depthTex.rt);
 			
 			volumetricsShader.SetVector("_CamPos", new Vector4(cam.transform.position.x, cam.transform.position.y, cam.transform.position.z, 0.0f));
@@ -133,14 +132,19 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat("_LightScattering",   lightScattering);
 			volumetricsShader.SetFloat("_StepSize",          math.max(0.1f, stepSize));
 			volumetricsShader.SetFloat("_NoiseSize",         noiseSize);
+			volumetricsShader.SetFloat("_DetailSize", detailSize);
+			volumetricsShader.SetFloat("_DetailStrength", detailStrength);
 			volumetricsShader.SetFloat("_YMin",              yMin);
 			volumetricsShader.SetFloat("_YMax",              yMax);
 			volumetricsShader.SetFloat("_MaxDistance",       maxDist);
 			volumetricsShader.SetFloat("_ShadowDensity",     shadowDensity);
 			volumetricsShader.SetFloat("_Gradient",          gradient);
+			volumetricsShader.SetFloat("_FBMMult", fbmMult);
 			
+			volumetricsShader.SetInt("_FirstPassStepAmount", firstPassStepAmount);
 			volumetricsShader.SetInt("_StepAmount",        math.min(math.max(stepAmount, 1),100));
 
+			volumetricsShader.SetBool("_FirstPass", firstPass);
 			volumetricsShader.SetBool("_UseStepSize", useStepSize);
 			
 			var proj = GL.GetGPUProjectionMatrix(cam.projectionMatrix, true);

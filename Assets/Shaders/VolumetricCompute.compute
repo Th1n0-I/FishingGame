@@ -4,14 +4,18 @@
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
 RWTexture2D<float4> Result;
-Texture3D<float4> NoiseTex;
-SamplerState sampler_NoiseTex;
+
+Texture3D<float4> _WorleyTex;
+sampler sampler_WorleyTex;
+
+Texture3D<float4> _PerlinTex;
+SamplerState sampler_PerlinTex;
 
 Texture2D<float4> DepthTex;
 SamplerState sampler_DepthTex;
 
-Texture2D<float4> _VolumetricsGradient;
-SamplerState sampler_VolumetricsGradient;
+Texture2D<float4> _CoverageTexture;
+SamplerState sampler_CoverageTexture;
 
 int TextureDivide;
 
@@ -24,16 +28,21 @@ float PI = 3.14159265358979323846;
 
 float _Time;
 float _DensityMultiplier;
+float _FBMMult;
 float _DensityThreshold;
 float _LightScattering;
 float _StepSize;
 float _NoiseSize;
+float _DetailSize;
+float _DetailStrength;
 float _MaxDistance;
 float _ShadowDensity;
 float _Gradient;
 
+int _FirstPassStepAmount;
 int _StepAmount;
 
+bool _FirstPass;
 bool _UseStepSize;
 
 float4 _CamPos;
@@ -64,29 +73,40 @@ float IGN(float2 p)
 
 float HenyeyGreenstein(float g, float costh)
 {
-    return (1.0 - g * g) / (4.0 * 3.14 * pow(1.0 + g * g - (2.0 * g) * costh, 1.5f));
+    float denom = max(1.0 + g * g - (2.0 * g) * costh, 0.00001);
+    return (1.0 - g * g) / (4.0 * 3.14 * pow(denom, 1.5f));
+}
+
+float remap(float v, float inMin, float inMax, float outMin, float outMax)
+{
+    return outMin + (v - inMin) / (inMax - inMin) * (outMax - outMin);
 }
 
 float get_density(float3 worldPos)
 {
-    float t = _Time;
-    /*float d = SAMPLE_TEXTURE3D(_NoiseTex, sampler_NoiseTex, float3(
-        (worldPos.x + _NoiseSpeed1x * t) / _NoiseSize1,
-        (worldPos.z + _NoiseSpeed1z * t) / _NoiseSize1,
-        worldPos.y / _NoiseSize1)).b * _DensityMultiplier * _NoiseWeight1;
-    d += SAMPLE_TEXTURE3D(_NoiseTex, sampler_NoiseTex, float3(
-        (worldPos.x + _NoiseSpeed2x * t) / _NoiseSize2,
-        (worldPos.z + _NoiseSpeed2z * t) / _NoiseSize2,
-        worldPos.y / _NoiseSize2)).b * _DensityMultiplier * _NoiseWeight2;
-    d += SAMPLE_TEXTURE3D(_NoiseTex, sampler_NoiseTex, float3(
-        (worldPos.x + _NoiseSpeed3x * t) / _NoiseSize3,
-        (worldPos.z + _NoiseSpeed3z * t) / _NoiseSize3,
-        worldPos.y / _NoiseSize3)).b * _DensityMultiplier * _NoiseWeight3;*/
-    float d = NoiseTex.SampleLevel(sampler_NoiseTex, worldPos / _NoiseSize, 0).b * _DensityMultiplier / 2;
-    d += NoiseTex.SampleLevel(sampler_NoiseTex, worldPos / _NoiseSize * 5, 0).b * _DensityMultiplier / 4;
-    d += NoiseTex.SampleLevel(sampler_NoiseTex, worldPos / _NoiseSize * 10, 0).b * _DensityMultiplier / 8;
-    d *= min((1-2*abs((worldPos.y - _MinBounds.y) / (_MaxBounds.y - _MinBounds.y) - 0.5)) * 1/_Gradient,1);
+    float4 perlin = _PerlinTex.SampleLevel(sampler_PerlinTex, float3(worldPos.x, worldPos.y, worldPos.z) / _NoiseSize, 0);
+    float4 worley = _WorleyTex.SampleLevel(sampler_WorleyTex, worldPos / _DetailSize, 0);   
+    //float4 cover = _CoverageTexture.SampleLevel(sampler_CoverageTexture, worldPos.xz / 1024, 0);
+    
+    float heightFrac = saturate((worldPos.y - _MinBounds.y) / (_MaxBounds.y - _MinBounds.y));
+    
+   
+    float fbm = perlin.r * 0.625 + perlin.g * 0.25 + perlin.b * 0.125;
+    float detailFbm = worley.r * 0.625 + worley.g * 0.25 + worley.b * 0.125;
+
+    detailFbm = lerp(detailFbm, 1.0 - detailFbm, heightFrac);
+    
+    fbm *= _FBMMult;
+    fbm = min(fbm, 1.0f);
+    float d = perlin.a;
     if (d < _DensityThreshold) return 0;
+    d = remap(d, fbm - 1.0, 1.0, 0.0, 1.0);
+    d = saturate(remap(d, detailFbm * _DetailStrength, 1.0, 0.0, 1.0));
+    d *= _DensityMultiplier;
+    d *= min((1-2*abs((worldPos.y - _MinBounds.y) / (_MaxBounds.y - _MinBounds.y) - 0.5)) * 1/_Gradient,1);
+    
+    
+    
     return d;
 }
 
@@ -115,58 +135,114 @@ void CSMain (uint3 id : SV_DispatchThreadID)
     
     float distLimit = min(viewLength, _MaxDistance);
     float transmittance = 1;
-    int steps = 0;
+    
     
     float2 entryExit = GetBounds(entryPos, rayDir);
     
     float stepSize;
     if (_UseStepSize) stepSize = _StepSize;
-    else stepSize = (entryExit.y - entryExit.x) / (float)_StepAmount;
-    
+    else
+    {
+        if (entryExit.x > 0.0) stepSize = (entryExit.y - entryExit.x) / (float)_StepAmount;
+        else stepSize = entryExit.y / (float)_StepAmount;
+    }
     bool intersect = (entryExit.y > 0.0 && entryExit.x < entryExit.y);
     
     if (!intersect) Result[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+    
     float distTravelled;
     if (entryExit.x > 0.0) distTravelled = entryExit.x + IGN(id.xy) * stepSize;
     else distTravelled = IGN(id.xy) * stepSize;
     
     distLimit = min(distLimit, entryExit.y);
     
-    [loop]
-    while (((_UseStepSize && distTravelled < distLimit) || (!_UseStepSize && steps <= _StepAmount && distTravelled < distLimit)) && transmittance > 0.01 && intersect)
+    if (intersect )
     {
-        float3 rayPos = entryPos + rayDir * distTravelled;
-        
-        float density = get_density(rayPos);
-        if (density > 0)
+        bool doSecondRayMarch = false;
+        if (_FirstPass && !_UseStepSize)
         {
-            float3 shadowRayDir = normalize(-_LightDirection.xyz);
-            float3 shadowRayEntryPos = rayPos + IGN(id.xy);
-            float shadowTransmittance = 1;
-            
-            for (int i = 1; i <= 6; i++)
+            float fStepSize;
+            float fDistTravelled;
+            float beginAt = -1.0;
+            float endAt = -1.0;
+            float fTransmittance = 1;
+            if (entryExit.x > 0.0)
             {
-                float3 shadowRayPos = shadowRayEntryPos + shadowRayDir * i * 0.2;
-                float shadowDensity = get_density(shadowRayPos) * _ShadowDensity;
-                if (shadowDensity > 0)
-                {
-                    shadowTransmittance *= exp(-shadowDensity);
-                }
+                fStepSize = (entryExit.y - entryExit.x) / (float)_FirstPassStepAmount;
+                fDistTravelled = entryExit.x + IGN(id.xy) * fStepSize;
+            }
+            else
+            {
+                fStepSize = entryExit.y / (float)_FirstPassStepAmount;
+                fDistTravelled = IGN(id.xy) * fStepSize;
             }
             
-            float d = density * stepSize;
-            float beer = exp(-d);
-            fogColor.rgb += transmittance * _MainLightColor.rgb * _LightContribution.rgb * HenyeyGreenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) * density * shadowTransmittance * stepSize;
-            transmittance *= beer;
+            int steps = 0;
+            
+            [loop]
+            while (fDistTravelled < min(entryExit.y,10000) && steps < _FirstPassStepAmount && transmittance > 0.01)
+            {
+                float3 rayPos = entryPos + rayDir * fDistTravelled;
+                
+                float density = get_density(rayPos);
+                if (density > 0)
+                {
+                    float d = density * fStepSize;
+                    fTransmittance *= exp(-d);
+                    doSecondRayMarch = true;
+                    if (beginAt == -1.0 || beginAt > fDistTravelled)
+                    {
+                        if (fDistTravelled - stepSize >= entryExit.x) beginAt = fDistTravelled - stepSize;
+                        else beginAt = fDistTravelled;
+                    } 
+                    if (endAt == -1.0 || endAt < fDistTravelled)
+                    {
+                        if (fDistTravelled + stepSize <= entryExit.y) endAt = fDistTravelled + stepSize;
+                        else endAt = fDistTravelled;
+                    }
+                }
+                fDistTravelled += fStepSize;
+                steps++;
+            }
+            distTravelled = beginAt;
+            distLimit = min(distLimit, endAt);
         }
-        distTravelled += stepSize;
-        steps++;
-    }
-    if (intersect)
-    {
+        
+        if (!_FirstPass || _UseStepSize || doSecondRayMarch)
+        {
+            int steps = 0;
+            [loop]
+            while (((_UseStepSize && distTravelled < distLimit) || (!_UseStepSize && steps <= _StepAmount && distTravelled < distLimit)) && transmittance > 0.01)
+            {
+                float3 rayPos = entryPos + rayDir * distTravelled;
+            
+                float density = get_density(rayPos);
+                if (density > 0)
+                {
+                    float3 shadowRayDir = normalize(-_LightDirection.xyz);
+                    float3 shadowRayEntryPos = rayPos + IGN(id.xy);
+                    float shadowTransmittance = 1;
+                    
+                    for (int i = 1; i <= 6; i++)
+                    {
+                        float3 shadowRayPos = shadowRayEntryPos + shadowRayDir * i * 0.2;
+                        float shadowDensity = get_density(shadowRayPos) * _ShadowDensity;
+                        if (shadowDensity > 0)
+                        {
+                            shadowTransmittance *= exp(-shadowDensity);
+                        }
+                    }
+                    
+                    float d = density * stepSize;
+                    float beer = exp(-d);
+                    //fogColor.rgb += transmittance * _MainLightColor.rgb * _LightContribution.rgb * HenyeyGreenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) * density * shadowTransmittance * stepSize;
+                    fogColor.rgb += _MainLightColor.rgg * (0.9 * HenyeyGreenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) + (1-0.9) * HenyeyGreenstein(0.3, dot(rayDir, -normalize(_LightDirection.xyz)))) * (exp(-shadowTransmittance)*(1.0 - exp(2.0 * -shadowTransmittance))) * _LightContribution.rgb; 
+                    transmittance *= beer;
+                }
+                distTravelled += stepSize;
+                steps++;
+            }
+        }
         Result[id.xy] = float4(fogColor.rgb, 1.0 - saturate(transmittance));
     }
-    
- 
-    
 }

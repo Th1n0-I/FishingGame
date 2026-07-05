@@ -1,33 +1,67 @@
 // Each #kernel tells which function to compile; you can have many kernels
-#pragma kernel CSMain
+#pragma kernel GenPerlin
+#pragma kernel GenWorley
 
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
-RWTexture3D<float4> Result;
+RWTexture3D<float4> PerlinTex;
+RWTexture3D<float4> WorleyTex;
 
-float Resolution;
-float4 Points[512];
-int PointCount;
+float _WorleySize1;
+float _WorleySize2;
+float _WorleySize3;
+float _WorleySize4;
 
-float3 Worley(float3 pos){
-    float d = -1;
-    for (int i = 0; i < PointCount; i++ )
+float _PerlinSize1;
+float _PerlinSize2;
+float _PerlinSize3;
+float _PerlinSize4;
+
+uint3 pcg3d(uint3 v)
+{
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    return v;
+}
+
+
+float3 hash33(int3 p)
+{
+    uint3 h = pcg3d((uint3)p);
+    return float3(h) * (1.0 / 4294967295.0) * 2.0 - 1.0;
+}
+
+float Worley(float3 pos, float size){
+    
+    float dist = -1;
+    
+    pos *= size;
+    float3 gridPos = floor(pos);
+    
+    for (int x = -1; x <= 1; x++)
     {
-        float3 p = float3(Points[i].x, Points[i].y, Points[i].z);
-        for (int px = -1; px <= 1; px++)
+        for (int y = -1; y <= 1; y++)
         {
-            for (int py = -1; py <= 1; py++)
+            for (int z = -1; z <= 1; z++)
             {
-                for (int pz = -1; pz <= 1; pz++)
+                float3 currentPoint = gridPos + float3(x, y, z);
+                float3 wrapped = fmod(currentPoint + size, size);
+                currentPoint += (hash33((int3)wrapped) + 1.0) / 2.0;
+                float d = distance(pos, currentPoint);
+                if (dist == -1.0 || d < dist)
                 {
-                    float temp = distance(float3(p.x - px, p.y - py, p.z - pz),float3(pos.x,pos.y,pos.z));
-                    if (d == -1 || temp < d) d = temp;
+                    dist = d;
                 }
             }
         }
     }
-    float4 color = float4(-d,0.0,0.0, 1.0);
-    return color;
+    return 1 - saturate(dist);
 }
 
 float smoothstep(float x)
@@ -35,18 +69,9 @@ float smoothstep(float x)
     return 6 * pow(x, 5) - 15 * pow(x, 4) + 10 * pow(x, 3);
 }
 
-// t is the current x, y, or z value, a is the first value and b is the second value.
 float customLerp(float t, float a, float b)
 {
     return a + smoothstep(frac(t)) * (b - a);
-}
-
-float3 hash33(int3 p)
-{
-    uint3 q = uint3(p.x * 1597334673, p.y * 3812015801, p.z * 2798796415);
-    q = uint3(q.x ^ q.y, q.y ^ q.z, q.z ^ q.x);
-    q = q * uint3(1597334673, 3812015801, 2798796415);
-    return float3(q) / 4294967295.0 * 2.0 - 1.0; // return -1 to 1 directly
 }
 
 float Perlin(float3 pos, float freq)
@@ -85,25 +110,7 @@ float Perlin(float3 pos, float freq)
     
     value = customLerp(p.z, y0, y1);
     
-    return value;
-}
-
-float MultPerlin(float3 pos)
-{
-    float value = 0;
-    float amplitude = 0.5;
-    float frequency = 2.0;
-    float sum = 0;
-    
-    for (int i = 0; i < 5; i++)
-    {
-        value += Perlin(pos, frequency) * amplitude;
-        sum += amplitude;
-        amplitude *= 0.5;
-        frequency *= 2;
-    }
-    value /= sum;
-    return saturate(value * 2.5 + 0.5);
+    return value * 0.5 + 0.5;
 }
 
 float remap(float v, float inMin, float inMax, float outMin, float outMax)
@@ -112,20 +119,30 @@ float remap(float v, float inMin, float inMax, float outMin, float outMax)
 }
 
 [numthreads(8,8,8)]
-void CSMain (uint3 id : SV_DispatchThreadID)
+void GenPerlin (uint3 id : SV_DispatchThreadID)
 {
-    float d = -1;
-    float x = (float)id.x / Resolution;
-    float y = (float)id.y / Resolution;
-    float z = (float)id.z / Resolution;
-    
-    float3 color = Worley(float3(x,y,z));
-    color.g = MultPerlin(float3(x,y,z));
-    color.b = saturate(remap(color.g, 0.0, 1.0, color.r, 1.0));
-      
-    Result[id.xyz] = float4(color,1.0); 
+    float3 uvw = (id.xyz + 0.5) / 128;
+    float4 perlin = float4(
+        (Worley(uvw, _PerlinSize1) * 0.125 + Worley(uvw, _PerlinSize1 / 2) * 0.25 + Worley(uvw, _PerlinSize1 / 4) * 0.5) / 0.875, 
+        (Worley(uvw, _PerlinSize2) * 0.125 + Worley(uvw, _PerlinSize2 / 2) * 0.25 + Worley(uvw, _PerlinSize2 / 4) * 0.5) / 0.875, 
+        (Worley(uvw, _PerlinSize3) * 0.125 + Worley(uvw, _PerlinSize3 / 2) * 0.25 + Worley(uvw, _PerlinSize3 / 4) * 0.5) / 0.875,
+        remap(
+            Perlin(uvw, _PerlinSize4),
+            Worley(uvw, _WorleySize4),
+            1.0,
+            0.0,
+            1.0));
+    PerlinTex[id.xyz] = float4(perlin);
 }
 
+[numthreads(8,8,8)]
+void GenWorley (uint3 id : SV_DispatchThreadID)
+{
+    float3 uvw = (id.xyz + 0.5) / 32;
+    float3 worley = float3(Worley(uvw, _WorleySize1), Worley(uvw, _WorleySize2), Worley(uvw, _WorleySize3));
+    
+    WorleyTex[id.xyz] = float4(worley.xyz, 1.0);
+}
 
 
 

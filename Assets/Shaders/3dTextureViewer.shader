@@ -17,8 +17,11 @@ Shader "Custom/Sample3DWorldspace"
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
-            TEXTURE3D(_NoiseTex);
-            SAMPLER(sampler_NoiseTex);
+            TEXTURE3D(_PerlinTex);
+            SAMPLER(sampler_PerlinTex);
+            
+            TEXTURE3D(_WorleyTex);
+            SAMPLER(sampler_WorleyTex);
             float _NoiseSize;
 
             struct Attributes
@@ -43,7 +46,7 @@ Shader "Custom/Sample3DWorldspace"
             half4 frag(Varyings IN) : SV_Target
             {
                 float3 uvw = frac(IN.positionWS / _NoiseSize);
-                return float4(SAMPLE_TEXTURE3D(_NoiseTex, sampler_NoiseTex, uvw).bbb,1.0);
+                return float4(SAMPLE_TEXTURE3D(_PerlinTex, sampler_PerlinTex, uvw).rgba);
             }
             ENDHLSL
         }
