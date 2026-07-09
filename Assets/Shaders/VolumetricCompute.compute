@@ -14,9 +14,6 @@ SamplerState sampler_PerlinTex;
 Texture2D<float4> DepthTex;
 SamplerState sampler_DepthTex;
 
-Texture2D<float4> _CoverageTexture;
-SamplerState sampler_CoverageTexture;
-
 int TextureDivide;
 
 int ScreenWidth;
@@ -38,12 +35,17 @@ float _DetailStrength;
 float _MaxDistance;
 float _ShadowDensity;
 float _Gradient;
+float _SphereMinRadius;
+float _SphereMaxRadius;
+float _SquishFactor;
 
 int _FirstPassStepAmount;
 int _StepAmount;
 
 bool _FirstPass;
 bool _UseStepSize;
+bool _UseBoundingBox;
+bool _UseBoundingSphere;
 
 float4 _CamPos;
 float4 _FogColor;
@@ -52,29 +54,18 @@ float4 _LightDirection;
 float4 _LightContribution;
 float4 _MinBounds;
 float4 _MaxBounds;
+float4 _SphereCenter;
 
-float2 GetBounds(float3 worldPos, float3 rayDir)
-{
-    float3 tl = float3((_MinBounds.x - worldPos.x) / rayDir.x, (_MinBounds.y - worldPos.y) / rayDir.y, (_MinBounds.z - worldPos.z) / rayDir.z);
-    float3 th = float3((_MaxBounds.x - worldPos.x) / rayDir.x, (_MaxBounds.y - worldPos.y) / rayDir.y, (_MaxBounds.z - worldPos.z) / rayDir.z);
-    
-    float tc = max(min(tl.x, th.x), max(min(tl.y, th.y),min(tl.z, th.z)));
-    float tf = min(max(tl.x, th.x), min(max(tl.y, th.y),max(tl.z, th.z)));
-    
-    return float2(tc,tf);
-}
-
-float IGN(float2 p)
+float ign(float2 p)
 {
     float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
     return frac( magic.z * frac(dot(p,magic.xy)) );
 }
 
-
-float HenyeyGreenstein(float g, float costh)
+float henyey_greenstein(float g, float costh)
 {
-    float denom = max(1.0 + g * g - (2.0 * g) * costh, 0.00001);
-    return (1.0 - g * g) / (4.0 * 3.14 * pow(denom, 1.5f));
+    float denominator = max(1.0 + g * g - (2.0 * g) * costh, 0.00001);
+    return (1.0 - g * g) / (4.0 * 3.14 * pow(denominator, 1.5f));
 }
 
 float remap(float v, float inMin, float inMax, float outMin, float outMax)
@@ -84,9 +75,10 @@ float remap(float v, float inMin, float inMax, float outMin, float outMax)
 
 float get_density(float3 worldPos)
 {
-    float4 perlin = _PerlinTex.SampleLevel(sampler_PerlinTex, float3(worldPos.x, worldPos.y, worldPos.z) / _NoiseSize, 0);
+    float3 newWorldPos = float3(worldPos.x, worldPos.y*_SquishFactor, worldPos.z);
+    
+    float4 perlin = _PerlinTex.SampleLevel(sampler_PerlinTex, newWorldPos / _NoiseSize, 0);
     float4 worley = _WorleyTex.SampleLevel(sampler_WorleyTex, worldPos / _DetailSize, 0);   
-    //float4 cover = _CoverageTexture.SampleLevel(sampler_CoverageTexture, worldPos.xz / 1024, 0);
     
     float heightFrac = saturate((worldPos.y - _MinBounds.y) / (_MaxBounds.y - _MinBounds.y));
     
@@ -103,11 +95,41 @@ float get_density(float3 worldPos)
     d = remap(d, fbm - 1.0, 1.0, 0.0, 1.0);
     d = saturate(remap(d, detailFbm * _DetailStrength, 1.0, 0.0, 1.0));
     d *= _DensityMultiplier;
-    d *= min((1-2*abs((worldPos.y - _MinBounds.y) / (_MaxBounds.y - _MinBounds.y) - 0.5)) * 1/_Gradient,1);
+    if (_UseBoundingBox) d *= min((1-2*abs((worldPos.y - _MinBounds.y) / (_MaxBounds.y - _MinBounds.y) - 0.5)) * 1/_Gradient,1);
+    else if (_UseBoundingSphere)
+    {
+        float distToCenter = distance(worldPos, _SphereCenter.xyz);
+        float distToBottom = distToCenter - _SphereMinRadius;
+        
+        float gradient = min((1-2*abs(distToBottom / (_SphereMaxRadius - _SphereMinRadius) - 0.5)) / _Gradient,1);
+        d *= gradient;
+    }
     
     
     
     return d;
+}
+
+float2 get_box_bounds(float3 worldPos, float3 rayDir)
+{
+    float3 tl = float3((_MinBounds.x - worldPos.x) / rayDir.x, (_MinBounds.y - worldPos.y) / rayDir.y, (_MinBounds.z - worldPos.z) / rayDir.z);
+    float3 th = float3((_MaxBounds.x - worldPos.x) / rayDir.x, (_MaxBounds.y - worldPos.y) / rayDir.y, (_MaxBounds.z - worldPos.z) / rayDir.z);
+    
+    float tc = max(min(tl.x, th.x), max(min(tl.y, th.y),min(tl.z, th.z)));
+    float tf = min(max(tl.x, th.x), min(max(tl.y, th.y),max(tl.z, th.z)));
+    
+    return float2(tc,tf);
+}
+
+float2 get_sphere_bounds(float3 worldPos, float3 rayDir, float radius)
+{
+    float b = 2 * dot((worldPos.xyz - _SphereCenter.xyz), rayDir.xyz);
+    float c = dot((worldPos.xyz - _SphereCenter.xyz), (worldPos.xyz - _SphereCenter.xyz)) - pow(radius, 2);
+    float h = pow(b, 2) - 4 * c;
+    if (h <= 0) return float2(-1, -1);
+    float t1 = (-b - sqrt(h)) / 2;
+    float t2 = (-b + sqrt(h)) / 2;
+    return float2(t1,t2);
 }
 
 float3 calculateWorldPos(float2 uv, float depth)
@@ -117,9 +139,52 @@ float3 calculateWorldPos(float2 uv, float depth)
     return worldPos.xyz / worldPos.w;
 }
 
+float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogCol, float stepSize, int maxSteps, float viewLength, float transmittance, float2 id)
+{
+    float distanceTravelled = ign(id) * stepSize;
+    float maxDist = distance(startPoint, endPoint);
+    if (distance(startPoint, camPoint) > viewLength) return float4(fogCol, transmittance);
+    if (distance(endPoint, camPoint) > viewLength) maxDist = viewLength - distance(startPoint, camPoint);
+    
+    float3 rayDir = normalize(endPoint - startPoint);
+    int steps = 0;
+    float3 fogColor = fogCol;
+    
+    while (distanceTravelled < maxDist && steps < maxSteps && transmittance > 0.1)
+    {
+        float3 worldPos = startPoint + rayDir * distanceTravelled;
+        distanceTravelled += stepSize;
+        steps++;
+        float density = get_density(worldPos);
+        if (density <= 0) continue;
+        float3 shadowRayDir = normalize(-_LightDirection.xyz);
+        float3 shadowRayEntryPos = worldPos + ign(id.xy);
+        float shadowTransmittance = 1;
+                    
+        for (int i = 1; i <= 6; i++)
+        {
+            float3 shadowRayPos = shadowRayEntryPos + shadowRayDir * i * 0.2;
+            float shadowDensity = get_density(shadowRayPos) * _ShadowDensity;
+            if (shadowDensity > 0)
+            {
+                shadowTransmittance *= exp(-shadowDensity);
+            }
+        }
+                    
+        float d = density * stepSize;
+        float beer = exp(-d);
+        //fogColor.rgb += transmittance * _MainLightColor.rgb * _LightContribution.rgb * HenyeyGreenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) * density * shadowTransmittance * stepSize;
+        fogColor.rgb += _MainLightColor.rgb * (0.9 * HenyeyGreenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) + (1-0.9) * HenyeyGreenstein(0.3, dot(rayDir, -normalize(_LightDirection.xyz)))) * (exp(-shadowTransmittance)*(1.0 - exp(2.0 * -shadowTransmittance))) * _LightContribution.rgb; 
+        transmittance *= beer;
+    }
+    return float4(fogColor.rgb, transmittance);
+}
+
 [numthreads(8,8,1)]
 void CSMain (uint3 id : SV_DispatchThreadID)
 {
+    Result[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+    
     int x = id.x * TextureDivide;
     int y = id.y * TextureDivide;
     float2 uv = float2((float)x / ScreenWidth, (float)y / ScreenHeight);
@@ -133,116 +198,108 @@ void CSMain (uint3 id : SV_DispatchThreadID)
     float viewLength = length(viewDir);
     float3 rayDir = normalize(viewDir);
     
-    float distLimit = min(viewLength, _MaxDistance);
-    float transmittance = 1;
-    
-    
-    float2 entryExit = GetBounds(entryPos, rayDir);
-    
-    float stepSize;
-    if (_UseStepSize) stepSize = _StepSize;
-    else
+    if (_UseBoundingSphere)
     {
-        if (entryExit.x > 0.0) stepSize = (entryExit.y - entryExit.x) / (float)_StepAmount;
-        else stepSize = entryExit.y / (float)_StepAmount;
-    }
-    bool intersect = (entryExit.y > 0.0 && entryExit.x < entryExit.y);
+        if (viewLength >= 4900 ) viewLength = _MaxDistance;
+        float2 sphere1intersect = get_sphere_bounds(entryPos, rayDir, _SphereMinRadius);
+        float2 sphere2intersect = get_sphere_bounds(entryPos, rayDir, _SphereMaxRadius);
+        
+        float3 sphere1entry = entryPos + rayDir * sphere1intersect.x;
+        float3 sphere1exit = entryPos + rayDir * sphere1intersect.y;
+        float3 sphere2entry = entryPos + rayDir * sphere2intersect.x;
+        float3 sphere2exit = entryPos + rayDir * sphere2intersect.y;
     
-    if (!intersect) Result[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
-    
-    float distTravelled;
-    if (entryExit.x > 0.0) distTravelled = entryExit.x + IGN(id.xy) * stepSize;
-    else distTravelled = IGN(id.xy) * stepSize;
-    
-    distLimit = min(distLimit, entryExit.y);
-    
-    if (intersect )
-    {
-        bool doSecondRayMarch = false;
-        if (_FirstPass && !_UseStepSize)
+        // The ray doesn't intersect With the biggest sphere, return immediately.
+        if (all(sphere2intersect < 0)) return;
+        
+        // The player is outside the biggest sphere and the ray intersects it.
+        if (all(sphere2intersect > 0))
         {
-            float fStepSize;
-            float fDistTravelled;
-            float beginAt = -1.0;
-            float endAt = -1.0;
-            float fTransmittance = 1;
-            if (entryExit.x > 0.0)
+            // The ray doesn't intersect with the smaller sphere, use the bigger sphere's intersect points for the pass's start and end position.
+            if (all(sphere1intersect < 0))
             {
-                fStepSize = (entryExit.y - entryExit.x) / (float)_FirstPassStepAmount;
-                fDistTravelled = entryExit.x + IGN(id.xy) * fStepSize;
-            }
-            else
-            {
-                fStepSize = entryExit.y / (float)_FirstPassStepAmount;
-                fDistTravelled = IGN(id.xy) * fStepSize;
+                float stepSize = distance(sphere2entry, sphere2exit) / _StepAmount;
+                float4 res = raymarch(sphere2entry, sphere2exit,entryPos, _FogColor.rgb, stepSize, _StepAmount, viewLength,1.0,id.xy);
+                Result[id.xy] = float4(res.rgb, 1.0 - saturate(res.a));
+                return;
             }
             
-            int steps = 0;
-            
-            [loop]
-            while (fDistTravelled < min(entryExit.y,10000) && steps < _FirstPassStepAmount && transmittance > 0.01)
+            // The ray intersects with both spheres, do two passes using the entry points for the first pass's entry and exit and the exit points for the second pass's.
+            if (all(sphere1intersect > 0))
             {
-                float3 rayPos = entryPos + rayDir * fDistTravelled;
-                
-                float density = get_density(rayPos);
-                if (density > 0)
-                {
-                    float d = density * fStepSize;
-                    fTransmittance *= exp(-d);
-                    doSecondRayMarch = true;
-                    if (beginAt == -1.0 || beginAt > fDistTravelled)
-                    {
-                        if (fDistTravelled - stepSize >= entryExit.x) beginAt = fDistTravelled - stepSize;
-                        else beginAt = fDistTravelled;
-                    } 
-                    if (endAt == -1.0 || endAt < fDistTravelled)
-                    {
-                        if (fDistTravelled + stepSize <= entryExit.y) endAt = fDistTravelled + stepSize;
-                        else endAt = fDistTravelled;
-                    }
-                }
-                fDistTravelled += fStepSize;
-                steps++;
+                float stepSize = distance(sphere2entry, sphere1entry) / _StepAmount;
+                float4 res = raymarch(sphere2entry, sphere1entry,entryPos, _FogColor.rgb,stepSize / 2,_StepAmount / 2,viewLength,1.0,id.xy);
+                stepSize = distance(sphere2exit, sphere1exit) / _StepAmount;
+                res = raymarch(sphere1exit, sphere2exit, entryPos, res.rgb, stepSize / 2,_StepAmount / 2,viewLength,res.a,id.xy);
+                Result[id.xy] = float4(res.rgb, 1.0 - saturate(res.a));
+                return;
             }
-            distTravelled = beginAt;
-            distLimit = min(distLimit, endAt);
         }
         
-        if (!_FirstPass || _UseStepSize || doSecondRayMarch)
+        // The player is inside the bigger sphere.
+        if (sphere2intersect.x < 0 && sphere2intersect.y > 0)
         {
-            int steps = 0;
-            [loop]
-            while (((_UseStepSize && distTravelled < distLimit) || (!_UseStepSize && steps <= _StepAmount && distTravelled < distLimit)) && transmittance > 0.01)
+            // The player is inside both spheres, use the exit points as the pass's entry and exit point.
+            if (sphere1intersect.x < 0 && sphere1intersect.y > 0)
             {
-                float3 rayPos = entryPos + rayDir * distTravelled;
+                float stepSize = distance(sphere1exit, sphere2exit) / _StepAmount;
+                float4 res = raymarch(sphere1exit, sphere2exit, entryPos, _FogColor.rgb,stepSize,_StepAmount,viewLength,1.0,id.xy);
+                Result[id.xy] = float4(res.rgb, 1.0 - saturate(res.a));
+                return;
+            }
             
-                float density = get_density(rayPos);
-                if (density > 0)
-                {
-                    float3 shadowRayDir = normalize(-_LightDirection.xyz);
-                    float3 shadowRayEntryPos = rayPos + IGN(id.xy);
-                    float shadowTransmittance = 1;
-                    
-                    for (int i = 1; i <= 6; i++)
-                    {
-                        float3 shadowRayPos = shadowRayEntryPos + shadowRayDir * i * 0.2;
-                        float shadowDensity = get_density(shadowRayPos) * _ShadowDensity;
-                        if (shadowDensity > 0)
-                        {
-                            shadowTransmittance *= exp(-shadowDensity);
-                        }
-                    }
-                    
-                    float d = density * stepSize;
-                    float beer = exp(-d);
-                    //fogColor.rgb += transmittance * _MainLightColor.rgb * _LightContribution.rgb * HenyeyGreenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) * density * shadowTransmittance * stepSize;
-                    fogColor.rgb += _MainLightColor.rgg * (0.9 * HenyeyGreenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) + (1-0.9) * HenyeyGreenstein(0.3, dot(rayDir, -normalize(_LightDirection.xyz)))) * (exp(-shadowTransmittance)*(1.0 - exp(2.0 * -shadowTransmittance))) * _LightContribution.rgb; 
-                    transmittance *= beer;
-                }
-                distTravelled += stepSize;
-                steps++;
+            // The player is inbetween spheres
+            
+            // The ray doesn't intersect with the smaller sphere, use the camera's position and the bigger sphere's exit point for the pass's entry and exit points.
+            if (all(sphere1intersect < 0))
+            {
+                float stepSize = distance(entryPos, sphere2exit) / _StepAmount;
+                float4 res = raymarch(entryPos, sphere2exit, entryPos, _FogColor.rgb,stepSize,_StepAmount,viewLength,1.0,id.xy);
+                Result[id.xy] = float4(res.rgb, 1.0 - saturate(res.a));
+                return;
+            }
+                
+            // The ray intersect with the smaller sphere, do two passes
+            // For the first pass use the camera's position and the entry point for the small sphere as the pass's entry and exit point.
+            // For the second pass use the spheres' exit points for the pass's entry and exit point.
+            if (all(sphere1intersect > 0))
+            {
+                float stepSize = distance(entryPos, sphere1entry) / _StepAmount;
+                float4 res = raymarch(entryPos, sphere1entry,entryPos, _FogColor.rgb,stepSize / 2,_StepAmount / 2,viewLength,1.0,id.xy);
+                stepSize = distance(sphere1exit, sphere2exit) / _StepAmount;
+                res = raymarch(sphere1exit, sphere2exit, entryPos, res.rgb, stepSize / 2,_StepAmount / 2,viewLength,res.a,id.xy);
+                Result[id.xy] = float4(res.rgb, 1.0 - saturate(res.a));
+                return;
             }
         }
-        Result[id.xy] = float4(fogColor.rgb, 1.0 - saturate(transmittance));
+    }
+    
+    if (_UseBoundingBox)
+    {
+        float2 entryExit = get_box_bounds(entryPos, rayDir);
+        
+        // The ray doesn't intersect with the bounding box. Return immediately.
+        if (entryExit.y < 0.0 || entryExit.x >= entryExit.y) return;
+        
+        float3 intersectPoint = entryPos + rayDir * entryExit.x;
+        float3 exitPoint = entryPos + rayDir * entryExit.y;
+        
+        // The player is inside the box, use the camera's position as the start point and the exit as the end point.
+        if (entryExit.x < 0.0 && entryExit.y > 0.0)
+        {
+            float stepSize = distance(entryPos, exitPoint) / _StepAmount;
+            float4 res = raymarch(entryPos, exitPoint,entryPos, _FogColor.rgb,stepSize,_StepAmount,viewLength,1.0,id.xy);
+            Result[id.xy] = float4(res.rgb, 1.0 - saturate(res.a));
+            return;
+        }
+        
+        // The player is outside the box and the ray intersects with it
+        if (entryExit.x > 0.0 && entryExit.x < entryExit.y)
+        {
+            float stepSize = distance(intersectPoint, exitPoint) / _StepAmount;
+            float4 res = raymarch(intersectPoint, exitPoint,entryPos, _FogColor.rgb,stepSize,_StepAmount,viewLength,1.0,id.xy);
+            Result[id.xy] = float4(res.rgb, 1.0 - saturate(res.a));
+            return;
+        }
     }
 }

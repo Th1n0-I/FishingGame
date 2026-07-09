@@ -1,5 +1,6 @@
 using System;
 using FishingGame;
+using Unity.Cinemachine;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -15,16 +16,22 @@ namespace Player {
 
 		[Header("Components")]
 		[SerializeField] private Transform groundCheckPosition;
-		private Rigidbody playerRb;
+		[SerializeField] private GameObject                     playerCamera;
+		[SerializeField] private Canvas                         cloudCanvas;
+		private                  Rigidbody                      playerRb;
+		private                  CinemachineInputAxisController playerAxisController;
 
 		//? Inputs
 		private InputAction lookAction;
 		private InputAction moveAction;
+		private InputAction pauseAction;
 
 		//? States
 		private Vector3 moveVector;
 		private Vector3 lookVector;
 		private Vector3 velocity;
+
+		private bool isPaused;
 
 		//? Move these states
 		private bool isGrounded;
@@ -44,11 +51,17 @@ namespace Player {
 			playerRb = GetComponent<Rigidbody>();
 
 			moveAction = InputSystem.actions.FindAction("Move");
+			
+			pauseAction = InputSystem.actions.FindAction("Pause");
+			cloudCanvas.enabled = false;
+			
+			playerAxisController = playerCamera.GetComponent<CinemachineInputAxisController>();
 
 			Cursor.lockState = CursorLockMode.Locked;
 		}
 
 		private void Update() {
+			CheckPause();
 			CheckGround();
 		}
 
@@ -67,6 +80,26 @@ namespace Player {
 		#endregion
 
 		#region Functions
+
+		private void CheckPause() {
+			if (pauseAction.triggered) {
+				switch (isPaused)
+				{
+					case true:
+						isPaused = false;
+						Cursor.lockState = CursorLockMode.Locked;
+						cloudCanvas.enabled = false;
+						playerAxisController.enabled = true;
+						break;
+					case false:
+						isPaused = true;
+						Cursor.lockState = CursorLockMode.None;
+						cloudCanvas.enabled = true;
+						playerAxisController.enabled = false;
+						break;
+				}
+			}
+		}
 
 		private void CheckGround() => isGrounded = Lib.Movement.GroundCheck(transform.position, groundMaxDist);
 

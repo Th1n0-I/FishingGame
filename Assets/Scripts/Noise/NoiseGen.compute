@@ -122,16 +122,18 @@ float remap(float v, float inMin, float inMax, float outMin, float outMax)
 void GenPerlin (uint3 id : SV_DispatchThreadID)
 {
     float3 uvw = (id.xyz + 0.5) / 128;
+    float perlinWorley = remap(
+            Perlin(uvw, _PerlinSize4) * 0.125 + Perlin(uvw, _PerlinSize4 / 2) * 0.25 + Perlin(uvw, _PerlinSize4 / 4) * 0.5,
+            Worley(uvw, _WorleySize4) * 0.125 + Worley(uvw, _WorleySize4 / 2) * 0.25 + Worley(uvw, _WorleySize4 / 4) * 0.5,
+            1.0,
+            0.0,
+            1.0);
     float4 perlin = float4(
         (Worley(uvw, _PerlinSize1) * 0.125 + Worley(uvw, _PerlinSize1 / 2) * 0.25 + Worley(uvw, _PerlinSize1 / 4) * 0.5) / 0.875, 
         (Worley(uvw, _PerlinSize2) * 0.125 + Worley(uvw, _PerlinSize2 / 2) * 0.25 + Worley(uvw, _PerlinSize2 / 4) * 0.5) / 0.875, 
         (Worley(uvw, _PerlinSize3) * 0.125 + Worley(uvw, _PerlinSize3 / 2) * 0.25 + Worley(uvw, _PerlinSize3 / 4) * 0.5) / 0.875,
-        remap(
-            Perlin(uvw, _PerlinSize4),
-            Worley(uvw, _WorleySize4),
-            1.0,
-            0.0,
-            1.0));
+        perlinWorley);
+        
     PerlinTex[id.xyz] = float4(perlin);
 }
 

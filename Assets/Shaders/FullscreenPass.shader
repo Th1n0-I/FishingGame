@@ -54,7 +54,7 @@ Shader "Custom/VolumetricFog"
                 }
                 sum /= 16;
                 
-                return lerp(color, float4(sum.rgb ,1.0), saturate(sum.a));
+                return lerp(color, float4(fogData.rgb ,1.0), saturate(fogData.a));
                 
             }
             ENDHLSL
