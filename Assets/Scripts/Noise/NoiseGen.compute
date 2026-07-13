@@ -7,15 +7,44 @@
 RWTexture3D<float4> PerlinTex;
 RWTexture3D<float4> WorleyTex;
 
-float _WorleySize1;
-float _WorleySize2;
-float _WorleySize3;
-float _WorleySize4;
+float pw_perlin1_size;
+float pw_perlin2_size;
+float pw_perlin3_size;
+float pw_perlin1_weight;
+float pw_perlin2_weight;
+float pw_perlin3_weight;
 
-float _PerlinSize1;
-float _PerlinSize2;
-float _PerlinSize3;
-float _PerlinSize4;
+float pw_worley1_size;
+float pw_worley2_size;
+float pw_worley3_size;
+float pw_worley1_weight;
+float pw_worley2_weight;
+float pw_worley3_weight;
+
+float t1_w1_o1_size;
+float t1_w1_o2_size;
+float t1_w1_o3_size;
+float t1_w1_o1_weight;
+float t1_w1_o2_weight;
+float t1_w1_o3_weight;
+
+float t1_w2_o1_size;
+float t1_w2_o2_size;
+float t1_w2_o3_size;
+float t1_w2_o1_weight;
+float t1_w2_o2_weight;
+float t1_w2_o3_weight;
+
+float t1_w3_o1_size;
+float t1_w3_o2_size;
+float t1_w3_o3_size;
+float t1_w3_o1_weight;
+float t1_w3_o2_weight;
+float t1_w3_o3_weight;
+
+float t2_w1_size;
+float t2_w2_size;
+float t2_w3_size;
 
 uint3 pcg3d(uint3 v)
 {
@@ -123,27 +152,25 @@ void GenPerlin (uint3 id : SV_DispatchThreadID)
 {
     float3 uvw = (id.xyz + 0.5) / 128;
     float perlinWorley = remap(
-            Perlin(uvw, _PerlinSize4) * 0.125 + Perlin(uvw, _PerlinSize4 / 2) * 0.25 + Perlin(uvw, _PerlinSize4 / 4) * 0.5,
-            Worley(uvw, _WorleySize4) * 0.125 + Worley(uvw, _WorleySize4 / 2) * 0.25 + Worley(uvw, _WorleySize4 / 4) * 0.5,
-            1.0,
-            0.0,
-            1.0);
+            (Perlin(uvw, pw_perlin1_size) * pw_perlin1_weight + Perlin(uvw, pw_perlin2_size) * pw_perlin2_weight + Perlin(uvw, pw_perlin3_size) * pw_perlin3_weight) / (pw_perlin1_weight + pw_perlin2_weight + pw_perlin3_weight),
+            (Worley(uvw, pw_worley1_size) * pw_worley1_weight + Worley(uvw, pw_worley2_size) * pw_worley2_weight + Worley(uvw, pw_worley3_size) * pw_worley3_weight) / (pw_worley1_weight + pw_worley2_weight + pw_worley3_weight),
+            1.0,0.0,1.0);
     float4 perlin = float4(
-        (Worley(uvw, _PerlinSize1) * 0.125 + Worley(uvw, _PerlinSize1 / 2) * 0.25 + Worley(uvw, _PerlinSize1 / 4) * 0.5) / 0.875, 
-        (Worley(uvw, _PerlinSize2) * 0.125 + Worley(uvw, _PerlinSize2 / 2) * 0.25 + Worley(uvw, _PerlinSize2 / 4) * 0.5) / 0.875, 
-        (Worley(uvw, _PerlinSize3) * 0.125 + Worley(uvw, _PerlinSize3 / 2) * 0.25 + Worley(uvw, _PerlinSize3 / 4) * 0.5) / 0.875,
+        (Worley(uvw, t1_w1_o1_size) * t1_w1_o1_weight + Worley(uvw, t1_w1_o2_size) * t1_w1_o2_weight + Worley(uvw, t1_w1_o3_size) * t1_w1_o3_weight) / (t1_w1_o1_weight + t1_w1_o2_weight + t1_w1_o3_weight), 
+        (Worley(uvw, t1_w2_o1_size) * t1_w2_o1_weight + Worley(uvw, t1_w2_o2_size) * t1_w2_o2_weight + Worley(uvw, t1_w2_o3_size) * t1_w2_o3_weight) / (t1_w2_o1_weight + t1_w2_o2_weight + t1_w2_o3_weight), 
+        (Worley(uvw, t1_w3_o1_size) * t1_w3_o1_weight + Worley(uvw, t1_w3_o2_size) * t1_w3_o2_weight + Worley(uvw, t1_w3_o3_size) * t1_w3_o3_weight) / (t1_w3_o1_weight + t1_w3_o2_weight + t1_w3_o3_weight),
         perlinWorley);
         
-    PerlinTex[id.xyz] = float4(perlin);
+    PerlinTex[id.xyz] = saturate(float4(perlin));
 }
 
 [numthreads(8,8,8)]
 void GenWorley (uint3 id : SV_DispatchThreadID)
 {
     float3 uvw = (id.xyz + 0.5) / 32;
-    float3 worley = float3(Worley(uvw, _WorleySize1), Worley(uvw, _WorleySize2), Worley(uvw, _WorleySize3));
+    float3 worley = float3(Worley(uvw, t2_w1_size), Worley(uvw, t2_w2_size), Worley(uvw, t2_w3_size));
     
-    WorleyTex[id.xyz] = float4(worley.xyz, 1.0);
+    WorleyTex[id.xyz] = saturate(float4(worley.xyz, 1.0));
 }
 
 
