@@ -22,12 +22,12 @@ public class NoiseController : MonoBehaviour {
 	[Header("-Settings")]
 	[SerializeField] private float fullDensityMult;
 	[SerializeField] private float densityMultiplier = 1.0f;
-	[SerializeField] private float fbmMult          = 1.0f;
-	[SerializeField] private float densityThreshold = 1.0f;
-	[SerializeField] private float lightScattering  = 1.0f;
-	[SerializeField] private float noiseSize        = 1.0f;
-	[SerializeField] private float detailSize       = 1.0f;
-	[SerializeField] private float detailStrength   = 1.0f;
+	[SerializeField] private float fbmMult           = 1.0f;
+	[SerializeField] private float densityThreshold  = 1.0f;
+	[SerializeField] private float lightScattering   = 1.0f;
+	[SerializeField] private float noiseSize         = 1.0f;
+	[SerializeField] private float detailSize        = 1.0f;
+	[SerializeField] private float detailStrength    = 1.0f;
 	[SerializeField] private float detail1Weight;
 	[SerializeField] private float detail2Weight;
 	[SerializeField] private float detail3Weight;
@@ -38,17 +38,24 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField] private float yMin          = 60;
 	[SerializeField] private float yMax          = 70;
 	[SerializeField] private float shadowDensity = 1.0f;
-	[SerializeField] private float gradient      = 0.2f;
-	[SerializeField] private float squishFactor  = 2f;
+	[SerializeField] private float shadowStepSize;
+	[SerializeField] private float shadowConeSpread;
+	[SerializeField] private float gradient     = 0.2f;
+	[SerializeField] private float squishFactor = 2f;
 	[SerializeField] private bool  useBoundingSphere;
 	[SerializeField] private float sphereMinRadius = 1.0f;
 	[SerializeField] private float sphereMaxRadius = 1.0f;
 	[SerializeField] private float cumulusYMin     = 1500f;
 	[SerializeField] private float cumulusYMax     = 2500f;
-	[SerializeField] private bool  combineBounds   = true;
+	[SerializeField] private float baseSpeed;
+	[SerializeField] private float detailSpeed;
+	[SerializeField] private bool  combineBounds = true;
 	[SerializeField] private Color fogColor;
+	[SerializeField] private Color fogColorNight;
 	[ColorUsage(true, true)] [SerializeField]
 	private Color lightContribution;
+	[ColorUsage(true, true)] [SerializeField]
+	private Color lightContributionSunset;
 	[SerializeField] private Texture2D coverageTexture;
 	[SerializeField] private Collider  bounds;
 	[SerializeField] private Transform sphereCenter;
@@ -102,94 +109,101 @@ public class NoiseController : MonoBehaviour {
 
 	[SerializeField] private RenderTexture perlinRenderTexture, worleyRenderTexture, volumetricsRenderTexture;
 	private                  Light         sun;
-	
+
 
 	#region Caches
 
-	private static readonly int PerlinTex           = Shader.PropertyToID("PerlinTex");
-	private static readonly int WorleyTex           = Shader.PropertyToID("WorleyTex");
-	private static readonly int WorleyTex1          = Shader.PropertyToID("_WorleyTex");
-	private static readonly int PerlinTex1          = Shader.PropertyToID("_PerlinTex");
-	private static readonly int TextureDivide       = Shader.PropertyToID("TextureDivide");
-	private static readonly int ScreenWidth         = Shader.PropertyToID("ScreenWidth");
-	private static readonly int ScreenHeight        = Shader.PropertyToID("ScreenHeight");
-	private static readonly int Result              = Shader.PropertyToID("Result");
-	private static readonly int DepthTex            = Shader.PropertyToID("DepthTex");
-	private static readonly int VolumetricsTex      = Shader.PropertyToID("_VolumetricsTex");
-	private static readonly int CamPos              = Shader.PropertyToID("_CamPos");
-	private static readonly int FogColor            = Shader.PropertyToID("_FogColor");
-	private static readonly int MainLightColor      = Shader.PropertyToID("_MainLightColor");
-	private static readonly int LightDirection      = Shader.PropertyToID("_LightDirection");
-	private static readonly int LightContribution   = Shader.PropertyToID("_LightContribution");
-	private static readonly int MinBounds           = Shader.PropertyToID("_MinBounds");
-	private static readonly int MaxBounds           = Shader.PropertyToID("_MaxBounds");
-	private static readonly int Time1               = Shader.PropertyToID("_Time");
-	private static readonly int DensityMultiplier   = Shader.PropertyToID("_DensityMultiplier");
-	private static readonly int DensityThreshold    = Shader.PropertyToID("_DensityThreshold");
-	private static readonly int LightScattering     = Shader.PropertyToID("_LightScattering");
-	private static readonly int StepSize            = Shader.PropertyToID("_StepSize");
-	private static readonly int NoiseSize           = Shader.PropertyToID("_NoiseSize");
-	private static readonly int DetailSize          = Shader.PropertyToID("_DetailSize");
-	private static readonly int DetailStrength      = Shader.PropertyToID("_DetailStrength");
-	private static readonly int MaxDistance         = Shader.PropertyToID("_MaxDistance");
-	private static readonly int ShadowDensity       = Shader.PropertyToID("_ShadowDensity");
-	private static readonly int Gradient1           = Shader.PropertyToID("_Gradient");
-	private static readonly int FbmMult             = Shader.PropertyToID("_FBMMult");
-	private static readonly int FirstPassStepAmount = Shader.PropertyToID("_FirstPassStepAmount");
-	private static readonly int StepAmount          = Shader.PropertyToID("_StepAmount");
-	private static readonly int FirstPass           = Shader.PropertyToID("_FirstPass");
-	private static readonly int UseStepSize         = Shader.PropertyToID("_UseStepSize");
-	private static readonly int InvVp               = Shader.PropertyToID("_InvVP");
-	private static readonly int SphereMinRadius     = Shader.PropertyToID("_SphereMinRadius");
-	private static readonly int SphereMaxRadius     = Shader.PropertyToID("_SphereMaxRadius");
-	private static readonly int SphereCenter        = Shader.PropertyToID("_SphereCenter");
-	private static readonly int UseBoundingSphere   = Shader.PropertyToID("_UseBoundingSphere");
-	private static readonly int SquishFactor        = Shader.PropertyToID("_SquishFactor");
-	private static readonly int PwPerlin1Size       = Shader.PropertyToID("pw_perlin1_size");
-	private static readonly int PwPerlin2Size       = Shader.PropertyToID("pw_perlin2_size");
-	private static readonly int PwPerlin3Size       = Shader.PropertyToID("pw_perlin3_size");
-	private static readonly int PwPerlin1Weight     = Shader.PropertyToID("pw_perlin1_weight");
-	private static readonly int PwPerlin2Weight     = Shader.PropertyToID("pw_perlin2_weight");
-	private static readonly int PwPerlin3Weight     = Shader.PropertyToID("pw_perlin3_weight");
-	private static readonly int PwWorley1Size       = Shader.PropertyToID("pw_worley1_size");
-	private static readonly int PwWorley2Size       = Shader.PropertyToID("pw_worley2_size");
-	private static readonly int PwWorley3Size       = Shader.PropertyToID("pw_worley3_size");
-	private static readonly int PwWorley1Weight     = Shader.PropertyToID("pw_worley1_weight");
-	private static readonly int PwWorley2Weight     = Shader.PropertyToID("pw_worley2_weight");
-	private static readonly int PwWorley3Weight     = Shader.PropertyToID("pw_worley3_weight");
-	private static readonly int T1W1O1Size          = Shader.PropertyToID("t1_w1_o1_size");
-	private static readonly int T1W1O2Size          = Shader.PropertyToID("t1_w1_o2_size");
-	private static readonly int T1W1O3Size          = Shader.PropertyToID("t1_w1_o3_size");
-	private static readonly int T1W1O1Weight        = Shader.PropertyToID("t1_w1_o1_weight");
-	private static readonly int T1W1O2Weight        = Shader.PropertyToID("t1_w1_o2_weight");
-	private static readonly int T1W1O3Weight        = Shader.PropertyToID("t1_w1_o3_weight");
-	private static readonly int T1W2O1Size          = Shader.PropertyToID("t1_w2_o1_size");
-	private static readonly int T1W2O2Size          = Shader.PropertyToID("t1_w2_o2_size");
-	private static readonly int T1W2O3Size          = Shader.PropertyToID("t1_w2_o3_size");
-	private static readonly int T1W2O1Weight        = Shader.PropertyToID("t1_w2_o1_weight");
-	private static readonly int T1W2O2Weight        = Shader.PropertyToID("t1_w2_o2_weight");
-	private static readonly int T1W2O3Weight        = Shader.PropertyToID("t1_w2_o3_weight");
-	private static readonly int T1W3O1Size          = Shader.PropertyToID("t1_w3_o1_size");
-	private static readonly int T1W3O2Size          = Shader.PropertyToID("t1_w3_o2_size");
-	private static readonly int T1W3O3Size          = Shader.PropertyToID("t1_w3_o3_size");
-	private static readonly int T1W3O1Weight        = Shader.PropertyToID("t1_w3_o1_weight");
-	private static readonly int T1W3O2Weight        = Shader.PropertyToID("t1_w3_o2_weight");
-	private static readonly int T1W3O3Weight        = Shader.PropertyToID("t1_w3_o3_weight");
-	private static readonly int T2W1Size            = Shader.PropertyToID("t2_w1_size");
-	private static readonly int T2W2Size            = Shader.PropertyToID("t2_w2_size");
-	private static readonly int T2W3Size            = Shader.PropertyToID("t2_w3_size");
-	private static readonly int CumulusYMin         = Shader.PropertyToID("cumulus_y_min");
-	private static readonly int CumulusYMax         = Shader.PropertyToID("cumulus_y_max");
-	private static readonly int CombineBounds       = Shader.PropertyToID("combine_bounds");
-	private static readonly int DetailFbmMult       = Shader.PropertyToID("detail_fbm_mult");
-	private static readonly int DetailFbmWeight1    = Shader.PropertyToID("detail_fbm_weight1");
-	private static readonly int DetailFbmWeight2    = Shader.PropertyToID("detail_fbm_weight2");
-	private static readonly int DetailFbmWeight3    = Shader.PropertyToID("detail_fbm_weight3");
-	private static readonly int DetailMult          = Shader.PropertyToID("detail_mult");
-	private static readonly int DetailWeight1       = Shader.PropertyToID("detail_weight1");
-	private static readonly int DetailWeight2       = Shader.PropertyToID("detail_weight2");
-	private static readonly int DetailWeight3       = Shader.PropertyToID("detail_weight3");
-	private static readonly int FullDensityMult     = Shader.PropertyToID("full_density_mult");
+	private static readonly int PerlinTex               = Shader.PropertyToID("PerlinTex");
+	private static readonly int WorleyTex               = Shader.PropertyToID("WorleyTex");
+	private static readonly int WorleyTex1              = Shader.PropertyToID("_WorleyTex");
+	private static readonly int PerlinTex1              = Shader.PropertyToID("_PerlinTex");
+	private static readonly int TextureDivide           = Shader.PropertyToID("TextureDivide");
+	private static readonly int ScreenWidth             = Shader.PropertyToID("ScreenWidth");
+	private static readonly int ScreenHeight            = Shader.PropertyToID("ScreenHeight");
+	private static readonly int Result                  = Shader.PropertyToID("Result");
+	private static readonly int DepthTex                = Shader.PropertyToID("DepthTex");
+	private static readonly int VolumetricsTex          = Shader.PropertyToID("_VolumetricsTex");
+	private static readonly int CamPos                  = Shader.PropertyToID("_CamPos");
+	private static readonly int FogColor                = Shader.PropertyToID("fog_base_color_day");
+	private static readonly int MainLightColor          = Shader.PropertyToID("_MainLightColor");
+	private static readonly int LightDirection          = Shader.PropertyToID("_LightDirection");
+	private static readonly int LightContribution       = Shader.PropertyToID("light_contribution_day");
+	private static readonly int MinBounds               = Shader.PropertyToID("_MinBounds");
+	private static readonly int MaxBounds               = Shader.PropertyToID("_MaxBounds");
+	private static readonly int Time1                   = Shader.PropertyToID("_Time");
+	private static readonly int DensityMultiplier       = Shader.PropertyToID("_DensityMultiplier");
+	private static readonly int DensityThreshold        = Shader.PropertyToID("_DensityThreshold");
+	private static readonly int LightScattering         = Shader.PropertyToID("_LightScattering");
+	private static readonly int StepSize                = Shader.PropertyToID("_StepSize");
+	private static readonly int NoiseSize               = Shader.PropertyToID("_NoiseSize");
+	private static readonly int DetailSize              = Shader.PropertyToID("_DetailSize");
+	private static readonly int DetailStrength          = Shader.PropertyToID("_DetailStrength");
+	private static readonly int MaxDistance             = Shader.PropertyToID("_MaxDistance");
+	private static readonly int ShadowDensity           = Shader.PropertyToID("_ShadowDensity");
+	private static readonly int Gradient1               = Shader.PropertyToID("_Gradient");
+	private static readonly int FbmMult                 = Shader.PropertyToID("_FBMMult");
+	private static readonly int FirstPassStepAmount     = Shader.PropertyToID("_FirstPassStepAmount");
+	private static readonly int StepAmount              = Shader.PropertyToID("_StepAmount");
+	private static readonly int FirstPass               = Shader.PropertyToID("_FirstPass");
+	private static readonly int UseStepSize             = Shader.PropertyToID("_UseStepSize");
+	private static readonly int InvVp                   = Shader.PropertyToID("_InvVP");
+	private static readonly int SphereMinRadius         = Shader.PropertyToID("_SphereMinRadius");
+	private static readonly int SphereMaxRadius         = Shader.PropertyToID("_SphereMaxRadius");
+	private static readonly int SphereCenter            = Shader.PropertyToID("_SphereCenter");
+	private static readonly int UseBoundingSphere       = Shader.PropertyToID("_UseBoundingSphere");
+	private static readonly int SquishFactor            = Shader.PropertyToID("_SquishFactor");
+	private static readonly int PwPerlin1Size           = Shader.PropertyToID("pw_perlin1_size");
+	private static readonly int PwPerlin2Size           = Shader.PropertyToID("pw_perlin2_size");
+	private static readonly int PwPerlin3Size           = Shader.PropertyToID("pw_perlin3_size");
+	private static readonly int PwPerlin1Weight         = Shader.PropertyToID("pw_perlin1_weight");
+	private static readonly int PwPerlin2Weight         = Shader.PropertyToID("pw_perlin2_weight");
+	private static readonly int PwPerlin3Weight         = Shader.PropertyToID("pw_perlin3_weight");
+	private static readonly int PwWorley1Size           = Shader.PropertyToID("pw_worley1_size");
+	private static readonly int PwWorley2Size           = Shader.PropertyToID("pw_worley2_size");
+	private static readonly int PwWorley3Size           = Shader.PropertyToID("pw_worley3_size");
+	private static readonly int PwWorley1Weight         = Shader.PropertyToID("pw_worley1_weight");
+	private static readonly int PwWorley2Weight         = Shader.PropertyToID("pw_worley2_weight");
+	private static readonly int PwWorley3Weight         = Shader.PropertyToID("pw_worley3_weight");
+	private static readonly int T1W1O1Size              = Shader.PropertyToID("t1_w1_o1_size");
+	private static readonly int T1W1O2Size              = Shader.PropertyToID("t1_w1_o2_size");
+	private static readonly int T1W1O3Size              = Shader.PropertyToID("t1_w1_o3_size");
+	private static readonly int T1W1O1Weight            = Shader.PropertyToID("t1_w1_o1_weight");
+	private static readonly int T1W1O2Weight            = Shader.PropertyToID("t1_w1_o2_weight");
+	private static readonly int T1W1O3Weight            = Shader.PropertyToID("t1_w1_o3_weight");
+	private static readonly int T1W2O1Size              = Shader.PropertyToID("t1_w2_o1_size");
+	private static readonly int T1W2O2Size              = Shader.PropertyToID("t1_w2_o2_size");
+	private static readonly int T1W2O3Size              = Shader.PropertyToID("t1_w2_o3_size");
+	private static readonly int T1W2O1Weight            = Shader.PropertyToID("t1_w2_o1_weight");
+	private static readonly int T1W2O2Weight            = Shader.PropertyToID("t1_w2_o2_weight");
+	private static readonly int T1W2O3Weight            = Shader.PropertyToID("t1_w2_o3_weight");
+	private static readonly int T1W3O1Size              = Shader.PropertyToID("t1_w3_o1_size");
+	private static readonly int T1W3O2Size              = Shader.PropertyToID("t1_w3_o2_size");
+	private static readonly int T1W3O3Size              = Shader.PropertyToID("t1_w3_o3_size");
+	private static readonly int T1W3O1Weight            = Shader.PropertyToID("t1_w3_o1_weight");
+	private static readonly int T1W3O2Weight            = Shader.PropertyToID("t1_w3_o2_weight");
+	private static readonly int T1W3O3Weight            = Shader.PropertyToID("t1_w3_o3_weight");
+	private static readonly int T2W1Size                = Shader.PropertyToID("t2_w1_size");
+	private static readonly int T2W2Size                = Shader.PropertyToID("t2_w2_size");
+	private static readonly int T2W3Size                = Shader.PropertyToID("t2_w3_size");
+	private static readonly int CumulusYMin             = Shader.PropertyToID("cumulus_y_min");
+	private static readonly int CumulusYMax             = Shader.PropertyToID("cumulus_y_max");
+	private static readonly int CombineBounds           = Shader.PropertyToID("combine_bounds");
+	private static readonly int DetailFbmMult           = Shader.PropertyToID("detail_fbm_mult");
+	private static readonly int DetailFbmWeight1        = Shader.PropertyToID("detail_fbm_weight1");
+	private static readonly int DetailFbmWeight2        = Shader.PropertyToID("detail_fbm_weight2");
+	private static readonly int DetailFbmWeight3        = Shader.PropertyToID("detail_fbm_weight3");
+	private static readonly int DetailMult              = Shader.PropertyToID("detail_mult");
+	private static readonly int DetailWeight1           = Shader.PropertyToID("detail_weight1");
+	private static readonly int DetailWeight2           = Shader.PropertyToID("detail_weight2");
+	private static readonly int DetailWeight3           = Shader.PropertyToID("detail_weight3");
+	private static readonly int FullDensityMult         = Shader.PropertyToID("full_density_mult");
+	private static readonly int Time                    = Shader.PropertyToID("time");
+	private static readonly int BaseSpeed               = Shader.PropertyToID("base_speed");
+	private static readonly int DetailSpeed             = Shader.PropertyToID("detail_speed");
+	private static readonly int ShadowStepSize          = Shader.PropertyToID("shadow_step_size");
+	private static readonly int ShadowConeSpread        = Shader.PropertyToID("shadow_cone_spread");
+	private static readonly int LightContributionSunset = Shader.PropertyToID("light_contribution_sunset");
+	private static readonly int FogBaseColorNight       = Shader.PropertyToID("fog_base_color_night");
 
 	#endregion
 
@@ -329,16 +343,21 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetVector(CamPos,
 			                            new Vector4(cam.transform.position.x, cam.transform.position.y,
 			                                        cam.transform.position.z, 0.0f));
+
 			volumetricsShader.SetVector(FogColor,          fogColor);
-			volumetricsShader.SetVector(MainLightColor,    sun.color);
-			volumetricsShader.SetVector(LightDirection,    sun.transform.forward);
-			volumetricsShader.SetVector(LightContribution, lightContribution);
-			volumetricsShader.SetVector(MinBounds,         bounds.bounds.min);
-			volumetricsShader.SetVector(MaxBounds,         bounds.bounds.max);
+			volumetricsShader.SetVector(FogBaseColorNight, fogColorNight);
+
+			volumetricsShader.SetVector(LightContribution,       lightContribution);
+			volumetricsShader.SetVector(LightContributionSunset, lightContributionSunset);
+
+			volumetricsShader.SetVector(MainLightColor, sun.color);
+			volumetricsShader.SetVector(LightDirection, sun.transform.forward);
+
+			volumetricsShader.SetVector(MinBounds, bounds.bounds.min);
+			volumetricsShader.SetVector(MaxBounds, bounds.bounds.max);
 			volumetricsShader.SetVector(SphereCenter,
 			                            new Vector4(sphereCenter.position.x, sphereCenter.position.y,
 			                                        sphereCenter.position.z, 0.0f));
-			
 			volumetricsShader.SetFloat(DensityMultiplier, densityMultiplier);
 			volumetricsShader.SetFloat(DensityThreshold,  densityThreshold);
 			volumetricsShader.SetFloat(LightScattering,   lightScattering);
@@ -360,13 +379,18 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(DetailWeight1,     smallDetail1Weight);
 			volumetricsShader.SetFloat(DetailWeight2,     smallDetail2Weight);
 			volumetricsShader.SetFloat(DetailWeight3,     smallDetail3Weight);
-			volumetricsShader.SetFloat(FullDensityMult, fullDensityMult);
-			
-			volumetricsShader.SetInt(StepAmount,          math.max(stepAmount, 1));
-			
+			volumetricsShader.SetFloat(FullDensityMult,   fullDensityMult);
+			volumetricsShader.SetFloat(Time,              UnityEngine.Time.time);
+			volumetricsShader.SetFloat(BaseSpeed,         baseSpeed);
+			volumetricsShader.SetFloat(DetailSpeed,       detailSpeed);
+			volumetricsShader.SetFloat(ShadowStepSize,    shadowStepSize);
+			volumetricsShader.SetFloat(ShadowConeSpread,  shadowConeSpread);
+
+			volumetricsShader.SetInt(StepAmount, math.max(stepAmount, 1));
+
 			volumetricsShader.SetBool(UseStepSize,       useStepSize);
 			volumetricsShader.SetBool(UseBoundingSphere, useBoundingSphere);
-			volumetricsShader.SetBool(CombineBounds, combineBounds);
+			volumetricsShader.SetBool(CombineBounds,     combineBounds);
 
 			var proj = GL.GetGPUProjectionMatrix(cam.projectionMatrix, true);
 			var view = cam.worldToCameraMatrix;
