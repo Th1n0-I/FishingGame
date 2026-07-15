@@ -198,7 +198,7 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
             shadow_distance_travelled += step_size;
             float3 shadowRayPos = shadowRayEntryPos + shadowRayDir * shadow_distance_travelled + right * shadow_distance_travelled * shadow_cone_spread * a[i-1].x + up * shadow_distance_travelled * shadow_cone_spread * a[i-1].y;
             float shadowDensity;
-            if (i < 4) shadowDensity = get_density(shadowRayPos) * step_size;
+            if (i < 6) shadowDensity = get_density(shadowRayPos) * step_size;
             else shadowDensity = get_density(shadowRayPos, true) * step_size;
             if (shadowDensity > 0)
             {
