@@ -14,14 +14,18 @@ SamplerState sampler_PerlinTex;
 Texture2D<float4> DepthTex;
 SamplerState sampler_DepthTex;
 
+Texture2D<float4> weather_map;
+SamplerState sampler_weather_map;
+
 int TextureDivide;
 
 int ScreenWidth;
 int ScreenHeight;
 
 float4x4 _InvVP;
+float4x4 inv_vp_old;
 
-float PI = 3.14159265358979323846;
+static const float PI = 3.14159265358979323846;
 
 float time;
 float full_density_mult;
@@ -50,6 +54,8 @@ float base_speed;
 float detail_speed;
 float shadow_step_size;
 float shadow_cone_spread;
+float coverage;
+float current_cloud_type;
 
 int _StepAmount;
 
@@ -57,6 +63,7 @@ bool _UseStepSize;
 bool _UseBoundingBox;
 bool _UseBoundingSphere;
 bool combine_bounds;
+bool use_temporal_upscaling;
 
 float4 _CamPos;
 
@@ -72,16 +79,27 @@ float4 _MinBounds;
 float4 _MaxBounds;
 float4 _SphereCenter;
 
+float4 pixel_offset;
+
+float4 cloud_type_stratus;
+float4 cloud_type_cumulus;
+float4 cloud_type_cumulonimbus;
+
 float ign(float2 p)
 {
     float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
     return frac( magic.z * frac(dot(p,magic.xy)) );
 }
 
-float henyey_greenstein(float g, float costh)
+float henyey_greenstein_old(float g, float costh)
 {
     float denominator = max(1.0 + g * g - (2.0 * g) * costh, 0.00001);
     return (1.0 - g * g) / (3.14 * pow(denominator, 1.5f));
+}
+
+float henyey_greenstein(float g, float costh)
+{
+    return ((1.0 - g * g) / pow(1 + g * g - 2.0 * g * costh, 1.5f)) / (4 * PI);
 }
 
 float remap(float v, float inMin, float inMax, float outMin, float outMax)
@@ -91,8 +109,12 @@ float remap(float v, float inMin, float inMax, float outMin, float outMax)
 
 float get_density(float3 worldPos, bool lowDetail = false)
 {
+    float4 weather = weather_map.SampleLevel(sampler_weather_map, worldPos.xz / 16000, 0);
+    
     float height_frac = (worldPos.y - cumulus_y_min) / (cumulus_y_max - cumulus_y_min);
-    float gradient = min((1 - 2 * abs(height_frac - 0.5)) / _Gradient, 1.0);
+    float4 g = lerp(cloud_type_stratus, cloud_type_cumulus, saturate(current_cloud_type * 2.0));
+    g = lerp(g, cloud_type_cumulonimbus, saturate(current_cloud_type * 2.0 - 1.0));
+    float gradient = smoothstep(g.x, g.y, worldPos.y) - smoothstep(g.z, g.w, worldPos.y);
     
     if (gradient <= 0) return 0;
     
@@ -103,14 +125,19 @@ float get_density(float3 worldPos, bool lowDetail = false)
     float4 perlin = _PerlinTex.SampleLevel(sampler_PerlinTex, perlin_world_pos , 0);
      
     
-    float d = perlin.a;
-    d *= _DensityMultiplier * gradient;
+    float d = saturate(remap(perlin.a, _ShadowDensity, 1.0, 0.0, 1.0));
+    d *= _DensityMultiplier;
     
     float3 texture1_worley_weights = float3(detail_fbm_weight1, detail_fbm_weight2, detail_fbm_weight3);
     float texture1_worley = 0;
     
     if (any(texture1_worley_weights > 0)) texture1_worley = (perlin.r * texture1_worley_weights.r + perlin.g * texture1_worley_weights.g + perlin.b * texture1_worley_weights.b) / (texture1_worley_weights.r + texture1_worley_weights.g + texture1_worley_weights.b);
-    d = remap(d,min(texture1_worley * detail_fbm_mult, 1.0), 1.0, 0.0, 1);
+    d = remap(d,min(-(texture1_worley),0) * detail_fbm_mult, 1.0, 0.0, 1);
+    
+    d *= gradient;
+    
+    float base_shape_with_coverage = remap(d, saturate(weather.r + coverage - 1), 1.0, 0.0, 1.0);
+    base_shape_with_coverage *= weather.r;
     
     if (!lowDetail)
     {
@@ -119,11 +146,11 @@ float get_density(float3 worldPos, bool lowDetail = false)
         float3 worley_world_pos = float3(worldPos.x / _DetailSize + time * detail_speed, worldPos.y * _SquishFactor / _DetailSize, worldPos.z / _DetailSize);
         float4 worley = _WorleyTex.SampleLevel(sampler_WorleyTex, worley_world_pos, 0);  
         if (any(texture2_worley_weights > 0)) texture2_worley = (worley.r * texture2_worley_weights.r + worley.g * texture2_worley_weights.g + worley.b * texture2_worley_weights.b) / (texture2_worley_weights.r + texture2_worley_weights.g + texture2_worley_weights.b);
-        d = remap(d, lerp(texture2_worley, 1-texture2_worley, height_frac) * detail_mult, 1.0, 0.0, 1);
+        base_shape_with_coverage = remap(base_shape_with_coverage, lerp(texture2_worley, -texture2_worley, height_frac) * detail_mult, 1.0, 0.0, 1);
     }
     
-    if (d < _DensityThreshold) return 0;
-    return d * full_density_mult;
+    if (base_shape_with_coverage <= _DensityThreshold) return 0;
+    return base_shape_with_coverage * full_density_mult;
 }
 
 float2 get_box_bounds(float3 worldPos, float3 rayDir)
@@ -148,10 +175,10 @@ float2 get_sphere_bounds(float3 worldPos, float3 rayDir, float radius)
     return float2(t1,t2);
 }
 
-float3 calculateWorldPos(float2 uv, float depth)
+float3 calculateWorldPos(float2 uv, float depth, float4x4 inv_vp)
 {
     float4 ndc = float4(uv * 2.0 - 1.0, depth, 1.0);
-    float4 worldPos = mul(_InvVP, ndc);
+    float4 worldPos = mul(inv_vp, ndc);
     return worldPos.xyz / worldPos.w;
 }
 
@@ -167,14 +194,14 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
         {
             maxDist = viewLength - distance(startPoint, camPoint);
             float2 uv = float2((float)id.x * TextureDivide / ScreenWidth, (float)id.y * TextureDivide / ScreenHeight);
-            endPoint = calculateWorldPos(uv, viewLength);
+            endPoint = calculateWorldPos(uv, viewLength, _InvVP);
         }
     
     float3 rayDir = normalize(endPoint - startPoint);
     int steps = 0;
     float3 fogColor = fogCol;
     
-    while (distanceTravelled < maxDist && steps < maxSteps && transmittance > 0.1)
+    while (distanceTravelled < maxDist && steps < maxSteps && transmittance > 0.0001)
     {
         
         
@@ -194,7 +221,8 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
                     
         for (int i = 1; i <= 6; i++)
         {
-            float step_size = i * shadow_step_size;
+            //float step_size = i * shadow_step_size;
+            float step_size = shadow_step_size * (i == 6 ? 3 : 1);
             shadow_distance_travelled += step_size;
             float3 shadowRayPos = shadowRayEntryPos + shadowRayDir * shadow_distance_travelled + right * shadow_distance_travelled * shadow_cone_spread * a[i-1].x + up * shadow_distance_travelled * shadow_cone_spread * a[i-1].y;
             float shadowDensity;
@@ -210,7 +238,9 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
         float beer = exp(-d);
         float beer_powder = exp(-d) * (1 - exp(-2 * d));
         //fogColor.rgb += transmittance * _MainLightColor.rgb * _LightContribution.rgb * HenyeyGreenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) * density * shadowTransmittance * stepSize;
-        fogColor.rgb += transmittance * _MainLightColor.rgb * max(0.9 * henyey_greenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))), 0.1 * henyey_greenstein(-0.3,dot(rayDir, -normalize(_LightDirection.xyz)))) * shadowTransmittance * light_contribution * beer_powder * smoothstep(-0.1, 0.05, sun_elevation); 
+        //fogColor.rgb += transmittance * _MainLightColor.rgb * max(0.9 * henyey_greenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))), 0.1 * henyey_greenstein(-0.3,dot(rayDir, -normalize(_LightDirection.xyz)))) * shadowTransmittance * light_contribution * beer_powder * smoothstep(-0.1, 0.05, sun_elevation); 
+        float light_energy = exp(-d) * (1 - exp(-2 * d)) * 2 * henyey_greenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) * shadowTransmittance;
+        fogColor.rgb += transmittance * light_contribution_day.rgb * light_energy;
         transmittance *= beer;
     }
     return float4(fogColor.rgb, transmittance);
@@ -219,6 +249,8 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
 [numthreads(8,8,1)]
 void CSMain (uint3 id : SV_DispatchThreadID)
 {
+    if (use_temporal_upscaling) id.xy = id.xy * 4 + pixel_offset;
+    
     Result[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
     
     int x = id.x * TextureDivide;
@@ -227,7 +259,7 @@ void CSMain (uint3 id : SV_DispatchThreadID)
     
     
     float depth = DepthTex.SampleLevel(sampler_DepthTex, uv, 0).r;
-    float3 worldPos = calculateWorldPos(uv, depth);
+    float3 worldPos = calculateWorldPos(uv, depth, _InvVP);
     float3 entryPos = _CamPos.xyz;
     float3 viewDir = worldPos - entryPos;
     float viewLength = length(viewDir) >= 4900 ? _MaxDistance : length(viewDir);
@@ -289,7 +321,7 @@ void CSMain (uint3 id : SV_DispatchThreadID)
             float3 b1 = entryPos + rayDir * seg1.y;
             res = raymarch(a1,b1,entryPos,res.rgb, distance(a1,b1)/steps, steps, viewLength, res.a, id.xy);
         }
-        Result[id.xy] = float4(res.rgb, 1.0 - saturate(res.a));
+        Result[id.xy] = float4(res.rgb, 1.0 - saturate((res.a <= 0.0001 ? 0 : res.a)));
         
     }
 }

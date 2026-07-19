@@ -46,7 +46,9 @@ Shader "Custom/Sample3DWorldspace"
             half4 frag(Varyings IN) : SV_Target
             {
                 float3 uvw = frac(IN.positionWS / _NoiseSize);
-                return float4(SAMPLE_TEXTURE3D(_PerlinTex, sampler_PerlinTex, uvw).rgba);
+                float3 worley = SAMPLE_TEXTURE3D(_PerlinTex, sampler_PerlinTex, uvw).rgb;
+                float fbm = worley.r * 0.625 + worley.g * 0.25 + worley.b * 0.125;
+                return float4(fbm.xxx, 1.0);
             }
             ENDHLSL
         }

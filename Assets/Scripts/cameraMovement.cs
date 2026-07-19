@@ -34,7 +34,7 @@ public class cameraMovement : MonoBehaviour {
 	    
 	    Vector2 move = moveAction.ReadValue<Vector2>();
 	    float elevate = elevationAction.ReadValue<float>();
-	    tr.position += (tr.forward * move.y + tr.right * move.x + tr.up * elevate) * (moveSens * (Cursor.lockState == CursorLockMode.Locked ? 1 : 0));
+	    tr.position += (tr.forward * move.y + tr.right * move.x + tr.up * elevate) * (Time.deltaTime * moveSens * (Cursor.lockState == CursorLockMode.Locked ? 1 : 0));
 	    
 	    Vector2 look = lookAction.ReadValue<Vector2>();
 	    tr.eulerAngles += new Vector3(-look.y, look.x, 0.0f) * (lookSens * (Cursor.lockState == CursorLockMode.Locked ? 1 : 0));

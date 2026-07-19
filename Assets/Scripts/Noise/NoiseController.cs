@@ -16,10 +16,13 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField] private int   firstPassStepAmount = 1;
 	[SerializeField] private int   stepAmount          = 1;
 	[SerializeField] private float maxDist             = 100;
-	[SerializeField] private bool  firstPass           = false;
-	[SerializeField] private bool  useStepSize         = false;
+	[SerializeField] private bool  firstPass;
+	[SerializeField] private bool  useStepSize;
+	[SerializeField] private bool  temporalUpscaling;
 
 	[Header("-Settings")]
+	[SerializeField] private float coverage;
+	[SerializeField] private float currentType;
 	[SerializeField] private float fullDensityMult;
 	[SerializeField] private float densityMultiplier = 1.0f;
 	[SerializeField] private float fbmMult           = 1.0f;
@@ -59,6 +62,11 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField] private Texture2D coverageTexture;
 	[SerializeField] private Collider  bounds;
 	[SerializeField] private Transform sphereCenter;
+
+	[Header("Cloud Types | BottomStart, BottomEnd, TopStart, TopEnd")]
+	[SerializeField] private Vector4 stratus;
+	[SerializeField] private Vector4 cumulus;
+	[SerializeField] private Vector4 cumulonimbus;
 
 	[Header("Noise")]
 	[SerializeField] private bool regenerateNoise = false;
@@ -107,9 +115,12 @@ public class NoiseController : MonoBehaviour {
 	[Header("Other")]
 	[SerializeField] private ComputeShader noiseShader, volumetricsShader;
 
-	[SerializeField] private RenderTexture perlinRenderTexture, worleyRenderTexture, volumetricsRenderTexture;
+	[SerializeField] private RenderTexture perlinRenderTexture, worleyRenderTexture, volumetricsRenderTexture, weatherRenderTexture;
 	private                  Light         sun;
 
+	[SerializeField] private Vector2 currentPixel = new Vector2(0, 0);
+	
+	private Matrix4x4 oldProjectionMatrix;
 
 	#region Caches
 
@@ -204,12 +215,24 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int ShadowConeSpread        = Shader.PropertyToID("shadow_cone_spread");
 	private static readonly int LightContributionSunset = Shader.PropertyToID("light_contribution_sunset");
 	private static readonly int FogBaseColorNight       = Shader.PropertyToID("fog_base_color_night");
+	private static readonly int PixelOffset             = Shader.PropertyToID("pixel_offset");
+	private static readonly int UseTemporalUpscaling    = Shader.PropertyToID("use_temporal_upscaling");
+	private static readonly int Coverage                = Shader.PropertyToID("coverage");
+	private static readonly int CloudTypeStratus        = Shader.PropertyToID("cloud_type_stratus");
+	private static readonly int CloudTypeCumulus        = Shader.PropertyToID("cloud_type_cumulus");
+	private static readonly int CloudTypeCumulonimbus   = Shader.PropertyToID("cloud_type_cumulonimbus");
+	private static readonly int CurrentCloudType        = Shader.PropertyToID("current_cloud_type");
+	private static readonly int WeatherTexture          = Shader.PropertyToID("weatherTexture");
+	private static readonly int WeatherMap              = Shader.PropertyToID("weather_map");
+	private static readonly int InvVpOld                = Shader.PropertyToID("inv_vp_old");
 
 	#endregion
 
 	#region Unity Functions
 
 	private void Start() {
+		InitializeWeather();
+		
 		InitializeNoise();
 
 		InitializeVolumetrics();
@@ -296,9 +319,9 @@ public class NoiseController : MonoBehaviour {
 	}
 
 	private void InitializePerlin() {
-		perlinRenderTexture = new RenderTexture(128, 128, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+		perlinRenderTexture = new RenderTexture(256, 256, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
 		perlinRenderTexture.dimension = TextureDimension.Tex3D;
-		perlinRenderTexture.volumeDepth = 128;
+		perlinRenderTexture.volumeDepth = 256;
 		perlinRenderTexture.enableRandomWrite = true;
 		perlinRenderTexture.wrapMode = TextureWrapMode.Repeat;
 		perlinRenderTexture.Create();
@@ -318,6 +341,7 @@ public class NoiseController : MonoBehaviour {
 
 		CreateVolumetricTexture();
 
+		volumetricsShader.SetTexture(0, WeatherMap, weatherRenderTexture);
 		volumetricsShader.SetTexture(0, PerlinTex1, perlinRenderTexture);
 		volumetricsShader.SetTexture(0, WorleyTex1, worleyRenderTexture);
 		volumetricsShader.SetTexture(0, Result,     volumetricsRenderTexture);
@@ -334,6 +358,23 @@ public class NoiseController : MonoBehaviour {
 	}
 
 	private void DispatchVolumetrics() {
+		for (int i = 0; i < 4; i++) {
+			for (int j = 0; j < 4; j++) {
+				if (currentPixel == new Vector2(i, j)) {
+					if (i == 3 && j == 3) {
+						currentPixel = new Vector2(0, 0);
+					} else if (i == 3) {
+						currentPixel = new Vector2(0, j + 1);
+					} else {
+						currentPixel.x++;
+					}
+
+					i = 5;
+					j = 5;
+				}
+			}
+		}
+
 		var cam      = Camera.main;
 		var depthTex = PersistentDepthFeature.PersistentDepthTexture;
 
@@ -358,6 +399,13 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetVector(SphereCenter,
 			                            new Vector4(sphereCenter.position.x, sphereCenter.position.y,
 			                                        sphereCenter.position.z, 0.0f));
+
+			volumetricsShader.SetVector(PixelOffset, new Vector4(currentPixel.x, currentPixel.y, 0.0f, 0.0f));
+			
+			volumetricsShader.SetVector(CloudTypeStratus, stratus);
+			volumetricsShader.SetVector(CloudTypeCumulus, cumulus);
+			volumetricsShader.SetVector(CloudTypeCumulonimbus, cumulonimbus);
+
 			volumetricsShader.SetFloat(DensityMultiplier, densityMultiplier);
 			volumetricsShader.SetFloat(DensityThreshold,  densityThreshold);
 			volumetricsShader.SetFloat(LightScattering,   lightScattering);
@@ -385,24 +433,52 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(DetailSpeed,       detailSpeed);
 			volumetricsShader.SetFloat(ShadowStepSize,    shadowStepSize);
 			volumetricsShader.SetFloat(ShadowConeSpread,  shadowConeSpread);
+			volumetricsShader.SetFloat(Coverage, coverage);
+			volumetricsShader.SetFloat(CurrentCloudType, currentType);
 
 			volumetricsShader.SetInt(StepAmount, math.max(stepAmount, 1));
 
-			volumetricsShader.SetBool(UseStepSize,       useStepSize);
-			volumetricsShader.SetBool(UseBoundingSphere, useBoundingSphere);
-			volumetricsShader.SetBool(CombineBounds,     combineBounds);
+			volumetricsShader.SetBool(UseStepSize,          useStepSize);
+			volumetricsShader.SetBool(UseBoundingSphere,    useBoundingSphere);
+			volumetricsShader.SetBool(CombineBounds,        combineBounds);
+			volumetricsShader.SetBool(UseTemporalUpscaling, temporalUpscaling);
 
 			var proj = GL.GetGPUProjectionMatrix(cam.projectionMatrix, true);
 			var view = cam.worldToCameraMatrix;
 			proj[1, 1] = -proj[1, 1];
 			var vp = proj * view;
 			volumetricsShader.SetMatrix(InvVp, vp.inverse);
+			volumetricsShader.SetMatrix(InvVpOld, oldProjectionMatrix);
 
-			volumetricsShader.Dispatch(0, volumetricsRenderTexture.width / 8, volumetricsRenderTexture.height / 8, 1);
+			volumetricsShader.Dispatch(0, volumetricsRenderTexture.width / 8 / (temporalUpscaling ? 4 : 1),
+			                           volumetricsRenderTexture.height   / 8 / (temporalUpscaling ? 4 : 1), 1);
+
+			oldProjectionMatrix = vp.inverse;
 		}
 	}
 
 	#endregion
+	
+	#region Weather Functions
 
+	private void InitializeWeather() {
+		InitializeWeatherTexture();
+		DispatchWeather();
+	}
+	
+	private void InitializeWeatherTexture() {
+		weatherRenderTexture = new RenderTexture(512, 512, 0 , RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+		weatherRenderTexture.enableRandomWrite = true;
+		weatherRenderTexture.wrapMode = TextureWrapMode.Repeat;
+		weatherRenderTexture.Create();
+		noiseShader.SetTexture(2,WeatherMap, weatherRenderTexture);
+		Shader.SetGlobalTexture(WeatherTexture, weatherRenderTexture);
+	}
+
+	private void DispatchWeather() {	
+		noiseShader.Dispatch(2, weatherRenderTexture.width    / 8, weatherRenderTexture.height / 8, 1);
+	}
+	
+	#endregion
 	#endregion
 }

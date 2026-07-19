@@ -1,11 +1,13 @@
 // Each #kernel tells which function to compile; you can have many kernels
 #pragma kernel GenPerlin
 #pragma kernel GenWorley
+#pragma kernel gen_weather
 
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
 RWTexture3D<float4> PerlinTex;
 RWTexture3D<float4> WorleyTex;
+RWTexture2D<float4> weather_map;
 
 float pw_perlin1_size;
 float pw_perlin2_size;
@@ -90,7 +92,7 @@ float Worley(float3 pos, float size){
             }
         }
     }
-    return 1 - saturate(dist);
+    return dist;
 }
 
 float smoothstep(float x)
@@ -139,7 +141,7 @@ float Perlin(float3 pos, float freq)
     
     value = customLerp(p.z, y0, y1);
     
-    return value * 0.5 + 0.5;
+    return value;
 }
 
 float remap(float v, float inMin, float inMax, float outMin, float outMax)
@@ -151,17 +153,22 @@ float remap(float v, float inMin, float inMax, float outMin, float outMax)
 void GenPerlin (uint3 id : SV_DispatchThreadID)
 {
     float3 uvw = (id.xyz + 0.5) / 128;
+    
+    float perlin = (Perlin(uvw, pw_perlin1_size) * pw_perlin1_weight + Perlin(uvw, pw_perlin2_size) * pw_perlin2_weight + Perlin(uvw, pw_perlin3_size) * pw_perlin3_weight) / (pw_perlin1_weight + pw_perlin2_weight + pw_perlin3_weight);
+    
+    float worley = (Worley(uvw, pw_worley1_size) * pw_worley1_weight + Worley(uvw, pw_worley2_size) * pw_worley2_weight + Worley(uvw, pw_worley3_size) * pw_worley3_weight) / (pw_worley1_weight + pw_worley2_weight + pw_worley3_weight);
+    
     float perlinWorley = remap(
-            (Perlin(uvw, pw_perlin1_size) * pw_perlin1_weight + Perlin(uvw, pw_perlin2_size) * pw_perlin2_weight + Perlin(uvw, pw_perlin3_size) * pw_perlin3_weight) / (pw_perlin1_weight + pw_perlin2_weight + pw_perlin3_weight),
-            (Worley(uvw, pw_worley1_size) * pw_worley1_weight + Worley(uvw, pw_worley2_size) * pw_worley2_weight + Worley(uvw, pw_worley3_size) * pw_worley3_weight) / (pw_worley1_weight + pw_worley2_weight + pw_worley3_weight),
-            1.0,0.0,1.0);
-    float4 perlin = float4(
+            perlin,
+            -(1 - worley),
+            0.5,0.0,1.0);
+    float4 result = float4(
         (Worley(uvw, t1_w1_o1_size) * t1_w1_o1_weight + Worley(uvw, t1_w1_o2_size) * t1_w1_o2_weight + Worley(uvw, t1_w1_o3_size) * t1_w1_o3_weight) / (t1_w1_o1_weight + t1_w1_o2_weight + t1_w1_o3_weight), 
         (Worley(uvw, t1_w2_o1_size) * t1_w2_o1_weight + Worley(uvw, t1_w2_o2_size) * t1_w2_o2_weight + Worley(uvw, t1_w2_o3_size) * t1_w2_o3_weight) / (t1_w2_o1_weight + t1_w2_o2_weight + t1_w2_o3_weight), 
         (Worley(uvw, t1_w3_o1_size) * t1_w3_o1_weight + Worley(uvw, t1_w3_o2_size) * t1_w3_o2_weight + Worley(uvw, t1_w3_o3_size) * t1_w3_o3_weight) / (t1_w3_o1_weight + t1_w3_o2_weight + t1_w3_o3_weight),
         perlinWorley);
-        
-    PerlinTex[id.xyz] = saturate(float4(perlin));
+    
+    PerlinTex[id.xyz] = float4(result);
 }
 
 [numthreads(8,8,8)]
@@ -171,6 +178,23 @@ void GenWorley (uint3 id : SV_DispatchThreadID)
     float3 worley = float3(Worley(uvw, t2_w1_size), Worley(uvw, t2_w2_size), Worley(uvw, t2_w3_size));
     
     WorleyTex[id.xyz] = saturate(float4(worley.xyz, 1.0));
+}
+
+[numthreads(8,8,1)]
+void gen_weather (uint3 id : SV_DispatchThreadID)
+{
+    float3 uvw = float3((id.xy + 0.5) / 512, 0);
+
+
+    float mask = Perlin(uvw, 2);
+    mask = smoothstep(-0.4, 0.6, mask);
+    
+    float detail = Perlin(uvw, 4) * 0.625 + Perlin(uvw, 8) * 0.25 + Perlin(uvw, 16) * 0.125;
+    detail = saturate(detail + 0.5);
+   
+    float result = mask * detail;
+    
+    weather_map[id.xy] = float4(result, 0.0, 0.0, 1.0);
 }
 
 
