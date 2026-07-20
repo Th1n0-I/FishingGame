@@ -1,5 +1,6 @@
 // Each #kernel tells which function to compile; you can have many kernels
 #pragma kernel CSMain
+#pragma kernel Reproject
 
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
@@ -17,13 +18,16 @@ SamplerState sampler_DepthTex;
 Texture2D<float4> weather_map;
 SamplerState sampler_weather_map;
 
+Texture2D<float4> rendertexture_old;
+SamplerState sampler_rendertexture_old;
+
 int TextureDivide;
 
 int ScreenWidth;
 int ScreenHeight;
 
 float4x4 _InvVP;
-float4x4 inv_vp_old;
+float4x4 prev_vp;
 
 static const float PI = 3.14159265358979323846;
 
@@ -79,11 +83,13 @@ float4 _MinBounds;
 float4 _MaxBounds;
 float4 _SphereCenter;
 
-float4 pixel_offset;
+uint pixel_offset;
 
 float4 cloud_type_stratus;
 float4 cloud_type_cumulus;
 float4 cloud_type_cumulonimbus;
+
+static const uint2 pixel_shuffle[16] = {{0,0},{2,2},{2,0},{0,2},{1,1},{3,3},{3,1},{1,3},{1,0},{3,2},{3,0},{1,2},{0,1},{2,3},{2,1},{0,3}};
 
 float ign(float2 p)
 {
@@ -175,6 +181,49 @@ float2 get_sphere_bounds(float3 worldPos, float3 rayDir, float radius)
     return float2(t1,t2);
 }
 
+float get_bounds_intersect(float3 pos, float3 rayDir)
+{
+    float2 sphere1intersect = get_sphere_bounds(pos, rayDir, _SphereMinRadius);
+    float2 sphere2intersect = get_sphere_bounds(pos, rayDir, _SphereMaxRadius);
+    float2 boxIntersect = get_box_bounds(pos, rayDir);
+       
+        
+    float tEnter = max(0.0, sphere2intersect.x);
+    float tExit = sphere2intersect.y;
+        
+    // The sphere is behind the player.
+    if (tExit <= tEnter) return -1;
+        
+    if (combine_bounds)
+    {
+        tEnter = max(tEnter, boxIntersect.x);
+        tExit = min(tExit, boxIntersect.y);
+        if (tExit <= tEnter) return -1;
+    }
+        
+    float2 seg0 = float2(tEnter, tExit);
+    
+        
+    float innerA = sphere1intersect.x;
+    float innerB = sphere1intersect.y;
+    bool innerHits = innerB > 0 && innerA < innerB;
+        
+    if (innerHits)
+    {
+        innerA = max(innerA, tEnter);
+        innerB = min(innerB, tExit);
+        if (innerA < innerB)
+        {
+            bool clipsStart = innerA <= tEnter;
+            bool clipsEnd = innerB >= tExit;
+            if (clipsStart && clipsEnd) return - 1; // The box is fully inside the smaller sphere.
+            else if (clipsStart) seg0.x = innerB;
+        }
+    }
+    
+    return seg0.x;
+}
+
 float3 calculateWorldPos(float2 uv, float depth, float4x4 inv_vp)
 {
     float4 ndc = float4(uv * 2.0 - 1.0, depth, 1.0);
@@ -249,12 +298,12 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
 [numthreads(8,8,1)]
 void CSMain (uint3 id : SV_DispatchThreadID)
 {
-    if (use_temporal_upscaling) id.xy = id.xy * 4 + pixel_offset;
+    if (use_temporal_upscaling) id.xy = id.xy * 4 + pixel_shuffle[pixel_offset];
     
     Result[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
     
-    int x = id.x * TextureDivide;
-    int y = id.y * TextureDivide;
+    int x = (id.x + 0.5) * TextureDivide;
+    int y = (id.y + 0.5) * TextureDivide;
     float2 uv = float2((float)x / ScreenWidth, (float)y / ScreenHeight);
     
     
@@ -324,4 +373,25 @@ void CSMain (uint3 id : SV_DispatchThreadID)
         Result[id.xy] = float4(res.rgb, 1.0 - saturate((res.a <= 0.0001 ? 0 : res.a)));
         
     }
+}
+
+[numthreads(8,8,1)]
+void Reproject(uint3 id : SV_DispatchThreadID)
+{
+    float2 uv = float2((id.x + 0.5) * TextureDivide / ScreenWidth, (id.y + 0.5) * TextureDivide / ScreenHeight);
+    float3 p = calculateWorldPos(uv, 0.5, _InvVP);
+    float3 rayDir = normalize(p - _CamPos.xyz);
+
+    float cloudEntry = get_bounds_intersect(_CamPos.xyz, rayDir);
+    
+    if (cloudEntry <= 0) {Result[id.xy] = rendertexture_old[id.xy]; return;}
+    
+    float3 cloud_pos = _CamPos.xyz + rayDir * cloudEntry;
+    float4 prev_clip = mul(prev_vp, float4(cloud_pos, 1.0));
+    float2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
+    
+    bool valid = prev_clip.w > 0 && all(prev_uv >= 0) && all(prev_uv <= 1);
+    
+    if (valid) {Result[id.xy] = rendertexture_old.SampleLevel(sampler_rendertexture_old, prev_uv, 0); return;}
+    Result[id.xy] = rendertexture_old.SampleLevel(sampler_rendertexture_old, clamp(prev_uv, 0, 1), 0);
 }

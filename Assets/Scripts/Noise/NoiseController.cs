@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using GrayWolf.GPUInstancing.Domain;
 using Unity.Mathematics;
@@ -115,12 +116,15 @@ public class NoiseController : MonoBehaviour {
 	[Header("Other")]
 	[SerializeField] private ComputeShader noiseShader, volumetricsShader;
 
-	[SerializeField] private RenderTexture perlinRenderTexture, worleyRenderTexture, volumetricsRenderTexture, weatherRenderTexture;
+	[SerializeField] private RenderTexture perlinRenderTexture, worleyRenderTexture, volumetricsRT_A, volumetricsRT_B, weatherRenderTexture;
 	private                  Light         sun;
 
-	[SerializeField] private Vector2 currentPixel = new Vector2(0, 0);
+	[SerializeField] private uint currentPixel = 0;
 	
 	private Matrix4x4 oldProjectionMatrix;
+
+	private bool firstFrame = true, useVRTA = true;
+		
 
 	#region Caches
 
@@ -224,12 +228,16 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int CurrentCloudType        = Shader.PropertyToID("current_cloud_type");
 	private static readonly int WeatherTexture          = Shader.PropertyToID("weatherTexture");
 	private static readonly int WeatherMap              = Shader.PropertyToID("weather_map");
-	private static readonly int InvVpOld                = Shader.PropertyToID("inv_vp_old");
+	private static readonly int PrevVp                  = Shader.PropertyToID("prev_vp");
+	private static readonly int RendertextureOld        = Shader.PropertyToID("rendertexture_old");
 
 	#endregion
 
 	#region Unity Functions
 
+	private void OnEnable() => RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
+	private void OnDisable() =>	RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering; 
+	
 	private void Start() {
 		InitializeWeather();
 		
@@ -239,10 +247,16 @@ public class NoiseController : MonoBehaviour {
 	}
 
 	private void Update() {
-		DispatchVolumetrics();
+		
 		if (!regenerateNoise) return;
 		DispatchNoise();
 		regenerateNoise = false;
+	}
+	
+
+	private void OnBeginCameraRendering(ScriptableRenderContext context, Camera cam) {
+		if (cam != Camera.main) return;
+		DispatchVolumetrics();
 	}
 
 	#endregion
@@ -344,42 +358,37 @@ public class NoiseController : MonoBehaviour {
 		volumetricsShader.SetTexture(0, WeatherMap, weatherRenderTexture);
 		volumetricsShader.SetTexture(0, PerlinTex1, perlinRenderTexture);
 		volumetricsShader.SetTexture(0, WorleyTex1, worleyRenderTexture);
-		volumetricsShader.SetTexture(0, Result,     volumetricsRenderTexture);
+		
 	}
 
 	private void CreateVolumetricTexture() {
-		volumetricsRenderTexture = new RenderTexture(Screen.width / textureDivide, Screen.height / textureDivide, 0,
+		volumetricsRT_A = new RenderTexture(Screen.width / textureDivide, Screen.height / textureDivide, 0,
 		                                             RenderTextureFormat.ARGBFloat);
-		volumetricsRenderTexture.enableRandomWrite = true;
-		volumetricsRenderTexture.wrapMode          = TextureWrapMode.Repeat;
-		volumetricsRenderTexture.filterMode        = FilterMode.Bilinear;
-		volumetricsRenderTexture.Create();
-		Shader.SetGlobalTexture(VolumetricsTex, volumetricsRenderTexture);
+		volumetricsRT_A.enableRandomWrite = true;
+		volumetricsRT_A.wrapMode          = TextureWrapMode.Repeat;
+		volumetricsRT_A.filterMode        = FilterMode.Bilinear;
+		volumetricsRT_A.Create();
+		
+		volumetricsRT_B = new RenderTexture(Screen.width / textureDivide, Screen.height / textureDivide, 0,
+		                                    RenderTextureFormat.ARGBFloat);
+		volumetricsRT_B.enableRandomWrite = true;
+		volumetricsRT_B.wrapMode          = TextureWrapMode.Repeat;
+		volumetricsRT_B.filterMode        = FilterMode.Bilinear;
+		volumetricsRT_B.Create();
 	}
 
 	private void DispatchVolumetrics() {
-		for (int i = 0; i < 4; i++) {
-			for (int j = 0; j < 4; j++) {
-				if (currentPixel == new Vector2(i, j)) {
-					if (i == 3 && j == 3) {
-						currentPixel = new Vector2(0, 0);
-					} else if (i == 3) {
-						currentPixel = new Vector2(0, j + 1);
-					} else {
-						currentPixel.x++;
-					}
-
-					i = 5;
-					j = 5;
-				}
-			}
-		}
+		currentPixel = (currentPixel + 1) % 16;
 
 		var cam      = Camera.main;
 		var depthTex = PersistentDepthFeature.PersistentDepthTexture;
 
 		if (depthTex != null && depthTex.rt && cam) {
-			volumetricsShader.SetTexture(0, DepthTex, depthTex.rt);
+			volumetricsShader.SetTexture(0, DepthTex,         depthTex.rt);
+			volumetricsShader.SetTexture(0, Result,           useVRTA ? volumetricsRT_A : volumetricsRT_B);
+			volumetricsShader.SetTexture(0, RendertextureOld, !useVRTA ? volumetricsRT_A : volumetricsRT_B);
+			volumetricsShader.SetTexture(1, Result,           useVRTA ? volumetricsRT_A : volumetricsRT_B);
+			volumetricsShader.SetTexture(1, RendertextureOld, !useVRTA ? volumetricsRT_A : volumetricsRT_B);
 
 			volumetricsShader.SetVector(CamPos,
 			                            new Vector4(cam.transform.position.x, cam.transform.position.y,
@@ -399,8 +408,7 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetVector(SphereCenter,
 			                            new Vector4(sphereCenter.position.x, sphereCenter.position.y,
 			                                        sphereCenter.position.z, 0.0f));
-
-			volumetricsShader.SetVector(PixelOffset, new Vector4(currentPixel.x, currentPixel.y, 0.0f, 0.0f));
+			
 			
 			volumetricsShader.SetVector(CloudTypeStratus, stratus);
 			volumetricsShader.SetVector(CloudTypeCumulus, cumulus);
@@ -437,6 +445,7 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(CurrentCloudType, currentType);
 
 			volumetricsShader.SetInt(StepAmount, math.max(stepAmount, 1));
+			volumetricsShader.SetInt(PixelOffset, (int)currentPixel);
 
 			volumetricsShader.SetBool(UseStepSize,          useStepSize);
 			volumetricsShader.SetBool(UseBoundingSphere,    useBoundingSphere);
@@ -447,13 +456,19 @@ public class NoiseController : MonoBehaviour {
 			var view = cam.worldToCameraMatrix;
 			proj[1, 1] = -proj[1, 1];
 			var vp = proj * view;
+			if (firstFrame) { oldProjectionMatrix = vp; firstFrame = false; }
 			volumetricsShader.SetMatrix(InvVp, vp.inverse);
-			volumetricsShader.SetMatrix(InvVpOld, oldProjectionMatrix);
+			volumetricsShader.SetMatrix(PrevVp, oldProjectionMatrix);
 
-			volumetricsShader.Dispatch(0, volumetricsRenderTexture.width / 8 / (temporalUpscaling ? 4 : 1),
-			                           volumetricsRenderTexture.height   / 8 / (temporalUpscaling ? 4 : 1), 1);
+			volumetricsShader.Dispatch(1, volumetricsRT_A.width / 8, volumetricsRT_A.height / 8, 1);
+			volumetricsShader.Dispatch(0, volumetricsRT_A.width / 8 / (temporalUpscaling ? 4 : 1),
+			                           volumetricsRT_A.height   / 8 / (temporalUpscaling ? 4 : 1), 1);
 
-			oldProjectionMatrix = vp.inverse;
+			oldProjectionMatrix = vp;
+
+			Shader.SetGlobalTexture(VolumetricsTex, useVRTA ? volumetricsRT_A : volumetricsRT_B);
+			
+			useVRTA = !useVRTA;
 		}
 	}
 
