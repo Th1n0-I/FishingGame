@@ -467,7 +467,7 @@ public class NoiseController : MonoBehaviour {
 	}
 	
 	private void InitializeWeatherTexture() {
-		weatherRenderTexture = new RenderTexture(512, 512, 0 , RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+		weatherRenderTexture = new RenderTexture(512, 512, 0 , RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Linear);
 		weatherRenderTexture.enableRandomWrite = true;
 		weatherRenderTexture.wrapMode = TextureWrapMode.Repeat;
 		weatherRenderTexture.Create();
