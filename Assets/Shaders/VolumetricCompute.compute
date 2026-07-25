@@ -1,10 +1,13 @@
 // Each #kernel tells which function to compile; you can have many kernels
 #pragma kernel CSMain
 #pragma kernel Reproject
+#pragma kernel CloudsShadows
 
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
 RWTexture2D<float4> Result;
+
+RWTexture2D<float4> shadowRT;
 
 Texture3D<float4> _WorleyTex;
 sampler sampler_WorleyTex;
@@ -60,6 +63,9 @@ float shadow_step_size;
 float shadow_cone_spread;
 float coverage;
 float current_cloud_type;
+float shadow_resolution;
+float shadow_world_size;
+int shadow_steps;
 
 int _StepAmount;
 
@@ -394,4 +400,32 @@ void Reproject(uint3 id : SV_DispatchThreadID)
     
     if (valid) {Result[id.xy] = rendertexture_old.SampleLevel(sampler_rendertexture_old, prev_uv, 0); return;}
     Result[id.xy] = rendertexture_old.SampleLevel(sampler_rendertexture_old, clamp(prev_uv, 0, 1), 0);
+}
+
+[numthreads(8,8,1)]
+void CloudsShadows(uint3 id : SV_DispatchThreadID)
+{
+    float2 worldXZ = _CamPos.xz + ((id.xy + 0.5) / shadow_resolution - 0.5) * shadow_world_size;
+    float3 shadow_start_pos = float3(worldXZ.x, _MinBounds.y, worldXZ.y);
+    float3 rayDir = normalize(-_LightDirection);
+    
+    float2 box_intersect = get_box_bounds(shadow_start_pos, rayDir);
+    
+    float3 endPoint = shadow_start_pos + rayDir * box_intersect.y;
+    
+    int steps = 0;
+    float optical_depth = 0.0;
+    
+    float step_size = distance(shadow_start_pos, endPoint) / shadow_steps;
+    
+    while (steps < shadow_steps)
+    {
+        float3 p = shadow_start_pos + rayDir * step_size * (steps + 0.5);
+        optical_depth += get_density(p, true) * step_size;
+        steps++;
+    }
+    
+    //shadowRT[id.xy] = frac(worldXZ.x * 0.001);
+    shadowRT[id.xy] = exp(-optical_depth);
+    //shadowRT[id.xy] = (id.x + 0.5) / shadow_resolution;
 }

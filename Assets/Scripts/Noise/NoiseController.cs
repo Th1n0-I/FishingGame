@@ -112,11 +112,15 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField, Range(0, 128)] private float t2W2Size = 1.0f;
 	[SerializeField, Range(0, 128)] private float t2W3Size = 1.0f;
 
+	[Header("Shadows")]
+	[SerializeField] private float shadowWorldSize = 1000;
+	[SerializeField] private int shadowSteps = 16;
+
 
 	[Header("Other")]
 	[SerializeField] private ComputeShader noiseShader, volumetricsShader;
 
-	[SerializeField] private RenderTexture perlinRenderTexture, worleyRenderTexture, volumetricsRT_A, volumetricsRT_B, weatherRenderTexture;
+	[SerializeField] private RenderTexture perlinRenderTexture, worleyRenderTexture, volumetricsRT_A, volumetricsRT_B, weatherRenderTexture, shadowRT;
 	private                  Light         sun;
 
 	[SerializeField] private uint currentPixel = 0;
@@ -230,6 +234,11 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int WeatherMap              = Shader.PropertyToID("weather_map");
 	private static readonly int PrevVp                  = Shader.PropertyToID("prev_vp");
 	private static readonly int RendertextureOld        = Shader.PropertyToID("rendertexture_old");
+	private static readonly int ShadowRT                = Shader.PropertyToID("shadowRT");
+	private static readonly int ShadowResolution1       = Shader.PropertyToID("shadow_resolution");
+	private static readonly int ShadowSteps             = Shader.PropertyToID("shadow_steps");
+	private static readonly int ShadowWorldSize         = Shader.PropertyToID("shadow_world_size");
+	private static readonly int WorldSize               = Shader.PropertyToID("_ShadowWorldSize");
 
 	#endregion
 
@@ -358,6 +367,9 @@ public class NoiseController : MonoBehaviour {
 		volumetricsShader.SetTexture(0, WeatherMap, weatherRenderTexture);
 		volumetricsShader.SetTexture(0, PerlinTex1, perlinRenderTexture);
 		volumetricsShader.SetTexture(0, WorleyTex1, worleyRenderTexture);
+		volumetricsShader.SetTexture(2, WeatherMap, weatherRenderTexture);
+		volumetricsShader.SetTexture(2, PerlinTex1, perlinRenderTexture);
+		volumetricsShader.SetTexture(2, WorleyTex1, worleyRenderTexture);
 		
 	}
 
@@ -375,6 +387,16 @@ public class NoiseController : MonoBehaviour {
 		volumetricsRT_B.wrapMode          = TextureWrapMode.Repeat;
 		volumetricsRT_B.filterMode        = FilterMode.Bilinear;
 		volumetricsRT_B.Create();
+
+		shadowRT = new RenderTexture(128, 128, 0, RenderTextureFormat.RHalf);
+		
+		shadowRT.enableRandomWrite = true;
+		shadowRT.wrapMode = TextureWrapMode.Clamp;
+		shadowRT.filterMode =  FilterMode.Bilinear;
+		shadowRT.Create();
+		
+		Shader.SetGlobalTexture(ShadowRT, shadowRT);
+		
 	}
 
 	private void DispatchVolumetrics() {
@@ -389,6 +411,8 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetTexture(0, RendertextureOld, !useVRTA ? volumetricsRT_A : volumetricsRT_B);
 			volumetricsShader.SetTexture(1, Result,           useVRTA ? volumetricsRT_A : volumetricsRT_B);
 			volumetricsShader.SetTexture(1, RendertextureOld, !useVRTA ? volumetricsRT_A : volumetricsRT_B);
+			
+			volumetricsShader.SetTexture(2, ShadowRT, shadowRT);
 
 			volumetricsShader.SetVector(CamPos,
 			                            new Vector4(cam.transform.position.x, cam.transform.position.y,
@@ -443,9 +467,13 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(ShadowConeSpread,  shadowConeSpread);
 			volumetricsShader.SetFloat(Coverage, coverage);
 			volumetricsShader.SetFloat(CurrentCloudType, currentType);
+			volumetricsShader.SetFloat(ShadowResolution1, shadowRT.width);
+			volumetricsShader.SetFloat(ShadowWorldSize, shadowWorldSize);
+			Shader.SetGlobalFloat(WorldSize, shadowWorldSize);
 
 			volumetricsShader.SetInt(StepAmount, math.max(stepAmount, 1));
 			volumetricsShader.SetInt(PixelOffset, (int)currentPixel);
+			volumetricsShader.SetInt(ShadowSteps, shadowSteps);
 
 			volumetricsShader.SetBool(UseStepSize,          useStepSize);
 			volumetricsShader.SetBool(UseBoundingSphere,    useBoundingSphere);
@@ -463,6 +491,7 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.Dispatch(1, volumetricsRT_A.width / 8, volumetricsRT_A.height / 8, 1);
 			volumetricsShader.Dispatch(0, volumetricsRT_A.width / 8 / (temporalUpscaling ? 4 : 1),
 			                           volumetricsRT_A.height   / 8 / (temporalUpscaling ? 4 : 1), 1);
+			volumetricsShader.Dispatch(2, shadowRT.width / 8, shadowRT.height / 8, 1);
 
 			oldProjectionMatrix = vp;
 

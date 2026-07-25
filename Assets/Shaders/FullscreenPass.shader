@@ -18,12 +18,18 @@ Shader "Custom/VolumetricFog"
             
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
             
             TEXTURE2D(_VolumetricsTex);
             SAMPLER(sampler_VolumetricsTex);
             
-            float4 _VolumetricsTex_TexelSize;
+            TEXTURE2D(shadowRT);
+            SAMPLER(sampler_shadowRT);
             
+            float4 _VolumetricsTex_TexelSize;
+
+            float _ShadowWorldSize;
+            static const float _ShadowStrength = 0.4;
             
             half4 frag(Varyings IN) : SV_Target
             {
@@ -32,27 +38,26 @@ Shader "Custom/VolumetricFog"
                 
                 float2 texel = _VolumetricsTex_TexelSize.xy;
                 
-                float w[9] = {
-                    0.5, 2.0, 0.5,
-                    2.0, 8.0, 0.5,
-                    0.5, 2.0, 0.5
-                };
+                float depth = SampleSceneDepth(IN.texcoord);
                 
-                float4 sum = 0.0;
-                int idx = 0;
+                #if UNITY_REVERSED_Z
+                    bool isSky = depth <= 0.0;
+                #else
+                    bool isSky = depth >= 1.0;
+                #endif
                 
-                [unroll]
-                for (int y = -1; y <= 1; y++)
+                if (!isSky)
                 {
-                    [unroll]
-                    for (int x = -1; x <= 1; x++)
+                    float3 worldPos = ComputeWorldSpacePosition(IN.texcoord, depth, UNITY_MATRIX_I_VP);
+                    float2 suv = (worldPos.xz - _WorldSpaceCameraPos.xz) / _ShadowWorldSize + 0.5;
+                    
+                    if (all(suv >= 0) && all(suv <= 1))
                     {
-                        float2 offset = float2(x, y) * texel;
-                        sum += SAMPLE_TEXTURE2D(_VolumetricsTex, sampler_VolumetricsTex, IN.texcoord + offset) * w[idx];
-                        idx++;
+                        float shadow = SAMPLE_TEXTURE2D(shadowRT, sampler_LinearClamp, suv).r;
+                        color.rgb *= lerp(_ShadowStrength, 1.0, shadow);
                     }
                 }
-                sum /= 16;
+                
                 return lerp(color, float4(fogData.rgb ,1.0), saturate(fogData.a));
                 
             }
