@@ -20,6 +20,7 @@
     "com.unity.render-pipelines.universal": "17.4.0",
     "com.unity.sdk.linux-x86_64": "1.1.0",
     "com.unity.settings-manager": "2.1.1",
+    "com.unity.terrain-tools": "5.3.2",
     "com.unity.test-framework": "1.6.0",
     "com.unity.timeline": "1.8.12",
     "com.unity.toolchain.win-x86_64-linux": "1.1.0",
