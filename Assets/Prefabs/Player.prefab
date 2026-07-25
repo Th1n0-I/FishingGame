@@ -73,7 +73,7 @@ GameObject:
   - component: {fileID: 6363623432150034336}
   - component: {fileID: 4910704357886731048}
   - component: {fileID: 7767243040944942964}
-  - component: {fileID: 4059314118226335246}
+  - component: {fileID: 3382084136501152685}
   m_Layer: 0
   m_Name: Player
   m_TagString: Untagged
@@ -115,6 +115,8 @@ MonoBehaviour:
   acceleration: 4
   groundMaxDist: 0.1
   groundCheckPosition: {fileID: 7740648107572421359}
+  playerCamera: {fileID: 0}
+  cloudCanvas: {fileID: 0}
 --- !u!1818360609 &7767243040944942964
 RotationConstraint:
   m_ObjectHideFlags: 0
@@ -135,31 +137,33 @@ RotationConstraint:
   m_Sources:
   - sourceTransform: {fileID: 0}
     weight: 1
---- !u!143 &4059314118226335246
-CharacterController:
+--- !u!54 &3382084136501152685
+Rigidbody:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 5252359922903363331}
-  m_Material: {fileID: 0}
+  serializedVersion: 5
+  m_Mass: 1
+  m_LinearDamping: 0
+  m_AngularDamping: 0.05
+  m_CenterOfMass: {x: 0, y: 0, z: 0}
+  m_InertiaTensor: {x: 1, y: 1, z: 1}
+  m_InertiaRotation: {x: 0, y: 0, z: 0, w: 1}
   m_IncludeLayers:
     serializedVersion: 2
     m_Bits: 0
   m_ExcludeLayers:
     serializedVersion: 2
     m_Bits: 0
-  m_LayerOverridePriority: 0
-  m_ProvidesContacts: 0
-  m_Enabled: 1
-  serializedVersion: 3
-  m_Height: 2
-  m_Radius: 0.5
-  m_SlopeLimit: 45
-  m_StepOffset: 0.3
-  m_SkinWidth: 0.08
-  m_MinMoveDistance: 0.001
-  m_Center: {x: 0, y: 0, z: 0}
+  m_ImplicitCom: 1
+  m_ImplicitTensor: 1
+  m_UseGravity: 1
+  m_IsKinematic: 0
+  m_Interpolate: 0
+  m_Constraints: 80
+  m_CollisionDetection: 0
 --- !u!1 &5731970231207834164
 GameObject:
   m_ObjectHideFlags: 0
