@@ -121,7 +121,7 @@ float remap(float v, float inMin, float inMax, float outMin, float outMax)
 
 float get_density(float3 worldPos, bool lowDetail = false)
 {
-    float4 weather = weather_map.SampleLevel(sampler_weather_map, worldPos.xz / 16000, 0);
+    /*float4 weather = weather_map.SampleLevel(sampler_weather_map, worldPos.xz / 16000, 0);
     
     float height_frac = (worldPos.y - cumulus_y_min) / (cumulus_y_max - cumulus_y_min);
     float4 g = lerp(cloud_type_stratus, cloud_type_cumulus, saturate(current_cloud_type * 2.0));
@@ -162,7 +162,29 @@ float get_density(float3 worldPos, bool lowDetail = false)
     }
     
     if (base_shape_with_coverage <= _DensityThreshold) return 0;
-    return base_shape_with_coverage * full_density_mult;
+    return base_shape_with_coverage * full_density_mult;*/
+    
+    float height_frac = (worldPos.y - cumulus_y_min) / (cumulus_y_max - cumulus_y_min);
+    float4 g = lerp(cloud_type_stratus, cloud_type_cumulus, saturate(current_cloud_type * 2.0));
+    g = lerp(g, cloud_type_cumulonimbus, saturate(current_cloud_type * 2.0 - 1.0));
+    float gradient = smoothstep(g.x, g.y, worldPos.y) - smoothstep(g.z, g.w, worldPos.y);
+    
+    if (gradient <= 0) return 0;
+
+    float3 perlin_world_pos = float3(worldPos.x / _NoiseSize + time * base_speed, worldPos.y * _SquishFactor / _NoiseSize, worldPos.z / _NoiseSize);
+    
+    
+    float4 perlin = _PerlinTex.SampleLevel(sampler_PerlinTex, perlin_world_pos , 0);
+    float3 texture1_worley_weights = float3(detail_fbm_weight1, detail_fbm_weight2, detail_fbm_weight3);
+    float texture1_worley = 0;
+    if (any(texture1_worley_weights > 0)) texture1_worley = (perlin.r * texture1_worley_weights.r + perlin.g * texture1_worley_weights.g + perlin.b * texture1_worley_weights.b) / (texture1_worley_weights.r + texture1_worley_weights.g + texture1_worley_weights.b);
+    
+    float base = perlin.a * gradient;
+    base = remap(base, coverage,1.0, 0.0, 1.0);
+    
+    float result = base;
+    result = remap(saturate(result), 1 - saturate(texture1_worley * detail_fbm_mult), 1.0, 0.0, 1.0);
+    return saturate(result * full_density_mult);
 }
 
 float2 get_box_bounds(float3 worldPos, float3 rayDir)

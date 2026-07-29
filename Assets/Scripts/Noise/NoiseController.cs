@@ -71,6 +71,7 @@ public class NoiseController : MonoBehaviour {
 
 	[Header("Noise")]
 	[SerializeField] private bool regenerateNoise = false;
+	[SerializeField] private bool constantlyGenerateNoise = false;
 	[Header("-Settings")]
 	[Header("--Perlin-Worley")]
 	[SerializeField, Range(0, 128)]
@@ -119,6 +120,7 @@ public class NoiseController : MonoBehaviour {
 
 	[Header("Other")]
 	[SerializeField] private ComputeShader noiseShader, volumetricsShader;
+	[SerializeField] private RawImage noiseDisplay;
 
 	[SerializeField] private RenderTexture perlinRenderTexture, worleyRenderTexture, volumetricsRT_A, volumetricsRT_B, weatherRenderTexture, shadowRT;
 	private                  Light         sun;
@@ -257,7 +259,7 @@ public class NoiseController : MonoBehaviour {
 
 	private void Update() {
 		
-		if (!regenerateNoise) return;
+		if (!regenerateNoise && !constantlyGenerateNoise) return;
 		DispatchNoise();
 		regenerateNoise = false;
 	}
@@ -524,5 +526,19 @@ public class NoiseController : MonoBehaviour {
 	}
 	
 	#endregion
+	#endregion
+	
+	#region public functions
+
+	public Texture GetTexture(int id) {
+		return id switch {
+			0 => perlinRenderTexture,
+			1 => worleyRenderTexture,
+			2 => weatherRenderTexture,
+			3 => shadowRT,
+			_ => perlinRenderTexture
+		};
+	}
+	
 	#endregion
 }
