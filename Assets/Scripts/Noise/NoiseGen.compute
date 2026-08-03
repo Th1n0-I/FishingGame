@@ -9,13 +9,6 @@ RWTexture3D<float4> PerlinTex;
 RWTexture3D<float4> WorleyTex;
 RWTexture2D<float4> weather_map;
 
-float pw_perlin1_size;
-float pw_perlin2_size;
-float pw_perlin3_size;
-float pw_perlin1_weight;
-float pw_perlin2_weight;
-float pw_perlin3_weight;
-
 float pw_worley1_size;
 float pw_worley2_size;
 float pw_worley3_size;
@@ -48,6 +41,16 @@ float t2_w1_size;
 float t2_w2_size;
 float t2_w3_size;
 
+float pw_perlin_base_frequency_global;
+float pw_perlin_lacunarity_global;
+float pw_perlin_gain_global;
+int pw_perlin_octaves_global;
+
+float pw_worley_base_frequency_global;
+float pw_worley_lacunarity_global;
+float pw_worley_gain_global;
+int pw_worley_octaves_global;
+
 uint3 pcg3d(uint3 v)
 {
     v = v * 1664525u + 1013904223u;
@@ -68,7 +71,7 @@ float3 hash33(int3 p)
     return float3(h) * (1.0 / 4294967295.0) * 2.0 - 1.0;
 }
 
-float Worley(float3 pos, float size){
+float Worley(float3 pos, int size){
     
     float dist = -1;
     
@@ -105,7 +108,7 @@ float customLerp(float t, float a, float b)
     return a + smoothstep(frac(t)) * (b - a);
 }
 
-float Perlin(float3 pos, float freq)
+float Perlin(float3 pos, int freq)
 {
     float3 p = pos * freq;
     float3 pmin = floor(p);
@@ -153,20 +156,57 @@ float remap(float v, float inMin, float inMax, float outMin, float outMax)
 void GenPerlin (uint3 id : SV_DispatchThreadID)
 {
     float3 uvw = (id.xyz + 0.5) / 128;
+
     
-    float perlin = (Perlin(uvw, pw_perlin1_size) * pw_perlin1_weight + Perlin(uvw, pw_perlin2_size) * pw_perlin2_weight + Perlin(uvw, pw_perlin3_size) * pw_perlin3_weight) / (pw_perlin1_weight + pw_perlin2_weight + pw_perlin3_weight);
-    perlin = perlin * 0.5 + 0.5;
-    float worley = (Worley(uvw, pw_worley1_size) * pw_worley1_weight + Worley(uvw, pw_worley2_size) * pw_worley2_weight + Worley(uvw, pw_worley3_size) * pw_worley3_weight) / (pw_worley1_weight + pw_worley2_weight + pw_worley3_weight);
-    worley = 1.0 - worley;
+    //float perlin = (Perlin(uvw, pw_perlin1_size) * pw_perlin1_weight + Perlin(uvw, pw_perlin2_size) * pw_perlin2_weight + Perlin(uvw, pw_perlin3_size) * pw_perlin3_weight) / (pw_perlin1_weight + pw_perlin2_weight + pw_perlin3_weight);
+    
+    
+    float pw_perlin = 0;
+    float pw_perlin_sum = 0;
+    float pw_perlin_amp = 1;
+    float pw_perlin_frequency = pw_perlin_base_frequency_global;
+    
+    for (int x = 0; x < pw_perlin_octaves_global; x++)
+    {
+        pw_perlin += Perlin(uvw, (int)round(pw_perlin_frequency)) * pw_perlin_amp;
+        pw_perlin_sum += pw_perlin_amp;
+        
+        pw_perlin_amp *= pw_perlin_gain_global;
+        pw_perlin_frequency *= pw_perlin_lacunarity_global;
+    }
+    
+    pw_perlin /= pw_perlin_sum;
+    
+    float pw_worley = 0;
+    float pw_worley_sum = 0;
+    float pw_worley_amp = 1;
+    float pw_worley_frequency = pw_worley_base_frequency_global;
+    
+    for (int x = 0; x < pw_worley_octaves_global; x++)
+    {
+        pw_worley += saturate(1 - Worley(uvw, (int)round(pw_worley_frequency))) * pw_worley_amp;
+        pw_worley_sum += pw_worley_amp;
+        
+        pw_worley_amp *= pw_perlin_gain_global;
+        pw_worley_frequency *= pw_perlin_lacunarity_global;
+    }
+    
+    pw_worley /= pw_worley_sum;
+    
     float perlinWorley = remap(
-            perlin,
+            pw_perlin,
             0,
-            1.0,worley,1.0);
-    float4 result = float4(
+            1.0,pw_worley,1.0);
+    /*float4 result = float4(
         (Worley(uvw, t1_w1_o1_size) * t1_w1_o1_weight + Worley(uvw, t1_w1_o2_size) * t1_w1_o2_weight + Worley(uvw, t1_w1_o3_size) * t1_w1_o3_weight) / (t1_w1_o1_weight + t1_w1_o2_weight + t1_w1_o3_weight), 
         (Worley(uvw, t1_w2_o1_size) * t1_w2_o1_weight + Worley(uvw, t1_w2_o2_size) * t1_w2_o2_weight + Worley(uvw, t1_w2_o3_size) * t1_w2_o3_weight) / (t1_w2_o1_weight + t1_w2_o2_weight + t1_w2_o3_weight), 
         (Worley(uvw, t1_w3_o1_size) * t1_w3_o1_weight + Worley(uvw, t1_w3_o2_size) * t1_w3_o2_weight + Worley(uvw, t1_w3_o3_size) * t1_w3_o3_weight) / (t1_w3_o1_weight + t1_w3_o2_weight + t1_w3_o3_weight),
-        perlinWorley);
+        perlinWorley);*/
+    float4 result = float4(
+        abs(pw_perlin),
+        pw_worley,
+        perlinWorley,
+        1.0);
     
     PerlinTex[id.xyz] = float4(result);
 }
