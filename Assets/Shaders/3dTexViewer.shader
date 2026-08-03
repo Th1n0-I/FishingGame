@@ -29,16 +29,16 @@ Shader "UI/Texture3DSlice"
 
                 if (_Channel == 0)
                 {
-                    val = SAMPLE_TEXTURE3D(_Volume, sampler_Volume, float3(i.uv, _Slice)).r;
+                    val = SAMPLE_TEXTURE3D(_Volume, sampler_Volume, float3(i.uv / 2.0, _Slice)).r;
                 } else if (_Channel == 1)
                 {
-                    val = SAMPLE_TEXTURE3D(_Volume, sampler_Volume, float3(i.uv, _Slice)).g;
+                    val = SAMPLE_TEXTURE3D(_Volume, sampler_Volume, float3(i.uv / 2.0, _Slice)).g;
                 } else if (_Channel == 2)
                 {
-                    val = SAMPLE_TEXTURE3D(_Volume, sampler_Volume, float3(i.uv, _Slice)).b;
+                    val = SAMPLE_TEXTURE3D(_Volume, sampler_Volume, float3(i.uv / 2.0, _Slice)).b;
                 } else if (_Channel == 3)
                 {
-                    val = SAMPLE_TEXTURE3D(_Volume, sampler_Volume, float3(i.uv, _Slice)).a;
+                    val = SAMPLE_TEXTURE3D(_Volume, sampler_Volume, float3(i.uv / 2.0, _Slice)).a;
                 }
                 
                 return half4(val,val,val,1) * i.color;

@@ -60,14 +60,15 @@ public class NoiseController : MonoBehaviour {
 	private Color lightContribution;
 	[ColorUsage(true, true)] [SerializeField]
 	private Color lightContributionSunset;
-	[SerializeField] private Texture2D coverageTexture;
+	[SerializeField] private Texture2D coverageTexture, CumulusLut;
 	[SerializeField] private Collider  bounds;
 	[SerializeField] private Transform sphereCenter;
 
 	[Header("Cloud Types | BottomStart, BottomEnd, TopStart, TopEnd")]
 	[SerializeField] private Vector4 stratus;
-	[SerializeField] private Vector4 cumulus;
-	[SerializeField] private Vector4 cumulonimbus;
+	[SerializeField] private AnimationCurve test;
+	[SerializeField] private Vector4        cumulus;
+	[SerializeField] private Vector4        cumulonimbus;
 
 	[Header("Noise")]
 	[SerializeField] private bool regenerateNoise = false;
@@ -234,6 +235,7 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int PwWorleyLacunarityGlobal    = Shader.PropertyToID("pw_worley_lacunarity_global");
 	private static readonly int PwWorleyGainGlobal          = Shader.PropertyToID("pw_worley_gain_global");
 	private static readonly int PwWorleyOctavesGlobal       = Shader.PropertyToID("pw_worley_octaves_global");
+	private static readonly int Lut                         = Shader.PropertyToID("cumulus_lut");
 
 	#endregion
 
@@ -248,6 +250,17 @@ public class NoiseController : MonoBehaviour {
 		InitializeNoise();
 
 		InitializeVolumetrics();
+		
+	}
+
+	private void OnValidate() {
+		var data = new float[128];
+		for (int i = 0; i < 128; i++) {
+			data[i] = test.Evaluate((i + 0.5f) / 128);
+		}
+		
+		CumulusLut.SetPixelData(data, 0);
+		CumulusLut.Apply(false);
 	}
 
 	private void Update() {
@@ -355,13 +368,16 @@ public class NoiseController : MonoBehaviour {
 		volumetricsShader.SetInt(ScreenHeight,  Screen.height);
 
 		CreateVolumetricTexture();
+		CreateCurveLuts();
 
 		volumetricsShader.SetTexture(0, WeatherMap, weatherRenderTexture);
 		volumetricsShader.SetTexture(0, PerlinTex1, perlinRenderTexture);
 		volumetricsShader.SetTexture(0, WorleyTex1, worleyRenderTexture);
+		volumetricsShader.SetTexture(0, Lut, CumulusLut);
 		volumetricsShader.SetTexture(2, WeatherMap, weatherRenderTexture);
 		volumetricsShader.SetTexture(2, PerlinTex1, perlinRenderTexture);
 		volumetricsShader.SetTexture(2, WorleyTex1, worleyRenderTexture);
+		volumetricsShader.SetTexture(2, Lut, CumulusLut);
 		
 	}
 
@@ -389,6 +405,13 @@ public class NoiseController : MonoBehaviour {
 		
 		Shader.SetGlobalTexture(ShadowRT, shadowRT);
 		
+	}
+
+	private void CreateCurveLuts() {
+		CumulusLut          = new Texture2D(128, 1, TextureFormat.RFloat, false, true) {
+			wrapMode = TextureWrapMode.Clamp,
+			filterMode = FilterMode.Bilinear,
+		};
 	}
 
 	private void DispatchVolumetrics() {
