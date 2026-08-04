@@ -35,9 +35,19 @@ float p_worley_3_gain_global;
 int p_worley_3_octaves_global;
 
 float w_worley_1_base_frequency_global;
-float w_worley_2_base_frequency_global;
-float w_worley_3_base_frequency_global;
+float w_worley_1_lacunarity_global;
+float w_worley_1_gain_global;
+int w_worley_1_octaves_global;
 
+float w_worley_2_base_frequency_global;
+float w_worley_2_lacunarity_global;
+float w_worley_2_gain_global;
+int w_worley_2_octaves_global;
+
+float w_worley_3_base_frequency_global;
+float w_worley_3_lacunarity_global;
+float w_worley_3_gain_global;
+int w_worley_3_octaves_global;
 
 uint3 pcg3d(uint3 v)
 {
@@ -196,7 +206,7 @@ void GenPerlin (uint3 id : SV_DispatchThreadID)
     float pw_worley = worley_fbm(uvw, pw_worley_base_frequency_global, pw_worley_gain_global, pw_worley_lacunarity_global, pw_worley_octaves_global);
     
     float perlinWorley = remap(
-            abs(pw_perlin),
+            pw_perlin,
             0,
             0.5,pw_worley,1.0);
     
