@@ -75,41 +75,34 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField] private bool constantlyGenerateNoise = false;
 	[Header("-Settings")]
 	[Header("--Perlin-Worley")]
-	[SerializeField, Range(2, 128)] private float pwPerlinBaseFrequency;
+	[SerializeField, Range(2, 128)]
+	private float pwPerlinBaseFrequency;
 	[SerializeField, Range(1, 3)] private float pwPerlinLacunarity;
 	[SerializeField, Range(0, 1)] private float pwPerlinGain;
 	[SerializeField, Range(1, 8)] private int   pwPerlinOctaves;
-	
 	[SerializeField, Range(2, 128)] private float pwWorleyBaseFrequency;
 	[SerializeField, Range(1, 3)]   private float pwWorleyLacunarity;
 	[SerializeField, Range(0, 1)]   private float pwWorleyGain;
 	[SerializeField, Range(1, 8)]   private int   pwWorleyOctaves;
-	
 	[Header("--Texture 1 Worley 1")]
-	[SerializeField, Range(0, 128)] private float t1W1O1Size = 1.0f;
-	[SerializeField, Range(0, 128)] private float t1W1O2Size   = 1.0f;
-	[SerializeField, Range(0, 128)] private float t1W1O3Size   = 1.0f;
-	[SerializeField, Range(0, 1)]   private float t1W1O1Weight = 1.0f;
-	[SerializeField, Range(0, 1)]   private float t1W1O2Weight = 1.0f;
-	[SerializeField, Range(0, 1)]   private float t1W1O3Weight = 1.0f;
+	[SerializeField, Range(2, 128)] private float pWorley1BaseFrequency;
+	[SerializeField, Range(1, 3)] private float pWorley1Lacunarity;
+	[SerializeField, Range(0, 1)] private float pWorley1Gain;
+	[SerializeField, Range(1, 8)] private int   pWorley1Octaves;
 	[Header("--Texture 1 Worley 2")]
-	[SerializeField, Range(0, 128)] private float t1W2O1Size = 1.0f;
-	[SerializeField, Range(0, 128)] private float t1W2O2Size   = 1.0f;
-	[SerializeField, Range(0, 128)] private float t1W2O3Size   = 1.0f;
-	[SerializeField, Range(0, 1)]   private float t1W2O1Weight = 1.0f;
-	[SerializeField, Range(0, 1)]   private float t1W2O2Weight = 1.0f;
-	[SerializeField, Range(0, 1)]   private float t1W2O3Weight = 1.0f;
+	[SerializeField, Range(2, 128)] private float pWorley2BaseFrequency;
+	[SerializeField, Range(1, 3)] private float pWorley2Lacunarity;
+	[SerializeField, Range(0, 1)] private float pWorley2Gain;
+	[SerializeField, Range(1, 8)] private int   pWorley2Octaves;
 	[Header("--Texture 1 Worley 3")]
-	[SerializeField, Range(0, 128)] private float t1W3O1Size = 1.0f;
-	[SerializeField, Range(0, 128)] private float t1W3O2Size   = 1.0f;
-	[SerializeField, Range(0, 128)] private float t1W3O3Size   = 1.0f;
-	[SerializeField, Range(0, 1)]   private float t1W3O1Weight = 1.0f;
-	[SerializeField, Range(0, 1)]   private float t1W3O2Weight = 1.0f;
-	[SerializeField, Range(0, 1)]   private float t1W3O3Weight = 1.0f;
+	[SerializeField, Range(2, 128)] private float pWorley3BaseFrequency;
+	[SerializeField, Range( 1, 3)]   private float pWorley3Lacunarity;
+	[SerializeField, Range( 0, 1)]   private float pWorley3Gain;
+	[SerializeField, Range( 1, 8)]   private int   pWorley3Octaves;
 	[Header("--Texture 2 Worley")]
-	[SerializeField, Range(0, 128)] private float t2W1Size = 1.0f;
-	[SerializeField, Range(0, 128)] private float t2W2Size = 1.0f;
-	[SerializeField, Range(0, 128)] private float t2W3Size = 1.0f;
+	[SerializeField, Range(0, 32)] private float wWorley1BaseFrequency;
+	[SerializeField, Range(0, 32)] private float wWorley2BaseFrequency;
+	[SerializeField, Range(0, 32)] private float wWorley3BaseFrequency;
 
 	[Header("Shadows")]
 	[SerializeField] private float shadowWorldSize = 1000;
@@ -120,15 +113,20 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField] private ComputeShader noiseShader, volumetricsShader;
 	[SerializeField] private RawImage noiseDisplay;
 
-	[SerializeField] private RenderTexture perlinRenderTexture, worleyRenderTexture, volumetricsRT_A, volumetricsRT_B, weatherRenderTexture, shadowRT;
-	private                  Light         sun;
+	[SerializeField] private RenderTexture perlinRenderTexture,
+	                                       worleyRenderTexture,
+	                                       volumetricsRT_A,
+	                                       volumetricsRT_B,
+	                                       weatherRenderTexture,
+	                                       shadowRT;
+	private Light sun;
 
 	[SerializeField] private uint currentPixel = 0;
-	
+
 	private Matrix4x4 oldProjectionMatrix;
 
-	private bool firstFrame = true, useVRTA = true;
-		
+	private bool firstFrame = true, useVRTA = true, curveDirty = true;
+
 
 	#region Caches
 
@@ -171,27 +169,6 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int SphereCenter                = Shader.PropertyToID("_SphereCenter");
 	private static readonly int UseBoundingSphere           = Shader.PropertyToID("_UseBoundingSphere");
 	private static readonly int SquishFactor                = Shader.PropertyToID("_SquishFactor");
-	private static readonly int T1W1O1Size                  = Shader.PropertyToID("t1_w1_o1_size");
-	private static readonly int T1W1O2Size                  = Shader.PropertyToID("t1_w1_o2_size");
-	private static readonly int T1W1O3Size                  = Shader.PropertyToID("t1_w1_o3_size");
-	private static readonly int T1W1O1Weight                = Shader.PropertyToID("t1_w1_o1_weight");
-	private static readonly int T1W1O2Weight                = Shader.PropertyToID("t1_w1_o2_weight");
-	private static readonly int T1W1O3Weight                = Shader.PropertyToID("t1_w1_o3_weight");
-	private static readonly int T1W2O1Size                  = Shader.PropertyToID("t1_w2_o1_size");
-	private static readonly int T1W2O2Size                  = Shader.PropertyToID("t1_w2_o2_size");
-	private static readonly int T1W2O3Size                  = Shader.PropertyToID("t1_w2_o3_size");
-	private static readonly int T1W2O1Weight                = Shader.PropertyToID("t1_w2_o1_weight");
-	private static readonly int T1W2O2Weight                = Shader.PropertyToID("t1_w2_o2_weight");
-	private static readonly int T1W2O3Weight                = Shader.PropertyToID("t1_w2_o3_weight");
-	private static readonly int T1W3O1Size                  = Shader.PropertyToID("t1_w3_o1_size");
-	private static readonly int T1W3O2Size                  = Shader.PropertyToID("t1_w3_o2_size");
-	private static readonly int T1W3O3Size                  = Shader.PropertyToID("t1_w3_o3_size");
-	private static readonly int T1W3O1Weight                = Shader.PropertyToID("t1_w3_o1_weight");
-	private static readonly int T1W3O2Weight                = Shader.PropertyToID("t1_w3_o2_weight");
-	private static readonly int T1W3O3Weight                = Shader.PropertyToID("t1_w3_o3_weight");
-	private static readonly int T2W1Size                    = Shader.PropertyToID("t2_w1_size");
-	private static readonly int T2W2Size                    = Shader.PropertyToID("t2_w2_size");
-	private static readonly int T2W3Size                    = Shader.PropertyToID("t2_w3_size");
 	private static readonly int CumulusYMin                 = Shader.PropertyToID("cumulus_y_min");
 	private static readonly int CumulusYMax                 = Shader.PropertyToID("cumulus_y_max");
 	private static readonly int CombineBounds               = Shader.PropertyToID("combine_bounds");
@@ -236,17 +213,32 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int PwWorleyGainGlobal          = Shader.PropertyToID("pw_worley_gain_global");
 	private static readonly int PwWorleyOctavesGlobal       = Shader.PropertyToID("pw_worley_octaves_global");
 	private static readonly int Lut                         = Shader.PropertyToID("cumulus_lut");
+	private static readonly int PWorley1BaseFrequencyGlobal = Shader.PropertyToID("p_worley_1_base_frequency_global");
+	private static readonly int PWorley1LacunarityGlobal    = Shader.PropertyToID("p_worley_1_lacunarity_global");
+	private static readonly int PWorley1GainGlobal          = Shader.PropertyToID("p_worley_1_gain_global");
+	private static readonly int PWorley1OctavesGlobal       = Shader.PropertyToID("p_worley_1_octaves_global");
+	private static readonly int PWorley2BaseFrequencyGlobal = Shader.PropertyToID("p_worley_2_base_frequency_global");
+	private static readonly int PWorley2LacunarityGlobal    = Shader.PropertyToID("p_worley_2_lacunarity_global");
+	private static readonly int PWorley2GainGlobal          = Shader.PropertyToID("p_worley_2_gain_global");
+	private static readonly int PWorley2OctavesGlobal       = Shader.PropertyToID("p_worley_2_octaves_global");
+	private static readonly int PWorley3BaseFrequencyGlobal = Shader.PropertyToID("p_worley_3_base_frequency_global");
+	private static readonly int PWorley3LacunarityGlobal    = Shader.PropertyToID("p_worley_3_lacunarity_global");
+	private static readonly int PWorley3GainGlobal          = Shader.PropertyToID("p_worley_3_gain_global");
+	private static readonly int PWorley3OctavesGlobal       = Shader.PropertyToID("p_worley_3_octaves_global");
+	private static readonly int WWorley1BaseFrequencyGlobal = Shader.PropertyToID("w_worley_1_base_frequency_global");
+	private static readonly int WWorley2BaseFrequencyGlobal = Shader.PropertyToID("w_worley_2_base_frequency_global");
+	private static readonly int WWorley3BaseFrequencyGlobal = Shader.PropertyToID("w_worley_3_base_frequency_global");
 
 	#endregion
 
 	#region Unity Functions
 
-	private void OnEnable() => RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
-	private void OnDisable() =>	RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering; 
-	
+	private void OnEnable()  => RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
+	private void OnDisable() => RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
+
 	private void Start() {
 		InitializeWeather();
-		
+
 		InitializeNoise();
 
 		InitializeVolumetrics();
@@ -254,22 +246,17 @@ public class NoiseController : MonoBehaviour {
 	}
 
 	private void OnValidate() {
-		var data = new float[128];
-		for (int i = 0; i < 128; i++) {
-			data[i] = test.Evaluate((i + 0.5f) / 128);
-		}
-		
-		CumulusLut.SetPixelData(data, 0);
-		CumulusLut.Apply(false);
+		curveDirty = true;
 	}
 
 	private void Update() {
-		
+		if(curveDirty) UpdateCurveLuts();
 		if (!regenerateNoise && !constantlyGenerateNoise) return;
 		DispatchNoise();
 		regenerateNoise = false;
+		
 	}
-	
+
 
 	private void OnBeginCameraRendering(ScriptableRenderContext context, Camera cam) {
 		if (cam != Camera.main) return;
@@ -279,6 +266,17 @@ public class NoiseController : MonoBehaviour {
 	#endregion
 
 	#region Custom Functions
+
+	private void UpdateCurveLuts() {
+		curveDirty = false;
+		var data = new float[128];
+		for (int i = 0; i < 128; i++) {
+			data[i] = test.Evaluate((i + 0.5f) / 128);
+		}
+
+		CumulusLut.SetPixelData(data, 0);
+		CumulusLut.Apply(false);
+	}
 
 	#region Noise Functions
 
@@ -294,41 +292,34 @@ public class NoiseController : MonoBehaviour {
 
 
 	private void DispatchNoise() {
-		
 		noiseShader.SetFloat(PwPerlinBaseFrequencyGlobal, pwPerlinBaseFrequency);
 		noiseShader.SetFloat(PwPerlinLacunarityGlobal,    pwPerlinLacunarity);
 		noiseShader.SetFloat(PwPerlinGainGlobal,          pwPerlinGain);
 		noiseShader.SetInt(PwPerlinOctavesGlobal, pwPerlinOctaves);
-		
+
 		noiseShader.SetFloat(PwWorleyBaseFrequencyGlobal, pwWorleyBaseFrequency);
 		noiseShader.SetFloat(PwWorleyLacunarityGlobal,    pwWorleyLacunarity);
 		noiseShader.SetFloat(PwWorleyGainGlobal,          pwWorleyGain);
 		noiseShader.SetInt(PwWorleyOctavesGlobal, pwWorleyOctaves);
 
-		noiseShader.SetFloat(T1W1O1Size,   t1W1O1Size);
-		noiseShader.SetFloat(T1W1O2Size,   t1W1O2Size);
-		noiseShader.SetFloat(T1W1O3Size,   t1W1O3Size);
-		noiseShader.SetFloat(T1W1O1Weight, t1W1O1Weight);
-		noiseShader.SetFloat(T1W1O2Weight, t1W1O2Weight);
-		noiseShader.SetFloat(T1W1O3Weight, t1W1O3Weight);
+		noiseShader.SetFloat(PWorley1BaseFrequencyGlobal, pWorley1BaseFrequency);
+		noiseShader.SetFloat(PWorley1LacunarityGlobal,     pWorley1Lacunarity);
+		noiseShader.SetFloat(PWorley1GainGlobal,           pWorley1Gain);
+		noiseShader.SetInt(PWorley1OctavesGlobal, pWorley1Octaves);
 
-		noiseShader.SetFloat(T1W2O1Size,   t1W2O1Size);
-		noiseShader.SetFloat(T1W2O2Size,   t1W2O2Size);
-		noiseShader.SetFloat(T1W2O3Size,   t1W2O3Size);
-		noiseShader.SetFloat(T1W2O1Weight, t1W2O1Weight);
-		noiseShader.SetFloat(T1W2O2Weight, t1W2O2Weight);
-		noiseShader.SetFloat(T1W2O3Weight, t1W2O3Weight);
+		noiseShader.SetFloat(PWorley2BaseFrequencyGlobal, pWorley2BaseFrequency);
+		noiseShader.SetFloat(PWorley2LacunarityGlobal,     pWorley2Lacunarity);
+		noiseShader.SetFloat(PWorley2GainGlobal,           pWorley2Gain);
+		noiseShader.SetInt(PWorley2OctavesGlobal, pWorley2Octaves);
 
-		noiseShader.SetFloat(T1W3O1Size,   t1W3O1Size);
-		noiseShader.SetFloat(T1W3O2Size,   t1W3O2Size);
-		noiseShader.SetFloat(T1W3O3Size,   t1W3O3Size);
-		noiseShader.SetFloat(T1W3O1Weight, t1W3O1Weight);
-		noiseShader.SetFloat(T1W3O2Weight, t1W3O2Weight);
-		noiseShader.SetFloat(T1W3O3Weight, t1W3O3Weight);
+		noiseShader.SetFloat(PWorley3BaseFrequencyGlobal, pWorley3BaseFrequency);
+		noiseShader.SetFloat(PWorley3LacunarityGlobal,     pWorley3Lacunarity);
+		noiseShader.SetFloat(PWorley3GainGlobal,           pWorley3Gain);
+		noiseShader.SetInt(PWorley3OctavesGlobal, pWorley3Octaves);
 
-		noiseShader.SetFloat(T2W1Size, t2W1Size);
-		noiseShader.SetFloat(T2W2Size, t2W2Size);
-		noiseShader.SetFloat(T2W3Size, t2W3Size);
+		noiseShader.SetFloat(WWorley1BaseFrequencyGlobal, wWorley1BaseFrequency);
+		noiseShader.SetFloat(WWorley2BaseFrequencyGlobal, wWorley2BaseFrequency);
+		noiseShader.SetFloat(WWorley3BaseFrequencyGlobal, wWorley3BaseFrequency);
 
 		noiseShader.Dispatch(0, perlinRenderTexture.width    / 8, perlinRenderTexture.height / 8,
 		                     perlinRenderTexture.volumeDepth / 8);
@@ -373,22 +364,21 @@ public class NoiseController : MonoBehaviour {
 		volumetricsShader.SetTexture(0, WeatherMap, weatherRenderTexture);
 		volumetricsShader.SetTexture(0, PerlinTex1, perlinRenderTexture);
 		volumetricsShader.SetTexture(0, WorleyTex1, worleyRenderTexture);
-		volumetricsShader.SetTexture(0, Lut, CumulusLut);
+		volumetricsShader.SetTexture(0, Lut,        CumulusLut);
 		volumetricsShader.SetTexture(2, WeatherMap, weatherRenderTexture);
 		volumetricsShader.SetTexture(2, PerlinTex1, perlinRenderTexture);
 		volumetricsShader.SetTexture(2, WorleyTex1, worleyRenderTexture);
-		volumetricsShader.SetTexture(2, Lut, CumulusLut);
-		
+		volumetricsShader.SetTexture(2, Lut,        CumulusLut);
 	}
 
 	private void CreateVolumetricTexture() {
 		volumetricsRT_A = new RenderTexture(Screen.width / textureDivide, Screen.height / textureDivide, 0,
-		                                             RenderTextureFormat.ARGBFloat);
+		                                    RenderTextureFormat.ARGBFloat);
 		volumetricsRT_A.enableRandomWrite = true;
 		volumetricsRT_A.wrapMode          = TextureWrapMode.Repeat;
 		volumetricsRT_A.filterMode        = FilterMode.Bilinear;
 		volumetricsRT_A.Create();
-		
+
 		volumetricsRT_B = new RenderTexture(Screen.width / textureDivide, Screen.height / textureDivide, 0,
 		                                    RenderTextureFormat.ARGBFloat);
 		volumetricsRT_B.enableRandomWrite = true;
@@ -397,19 +387,18 @@ public class NoiseController : MonoBehaviour {
 		volumetricsRT_B.Create();
 
 		shadowRT = new RenderTexture(128, 128, 0, RenderTextureFormat.RHalf);
-		
+
 		shadowRT.enableRandomWrite = true;
-		shadowRT.wrapMode = TextureWrapMode.Clamp;
-		shadowRT.filterMode =  FilterMode.Bilinear;
+		shadowRT.wrapMode          = TextureWrapMode.Clamp;
+		shadowRT.filterMode        = FilterMode.Bilinear;
 		shadowRT.Create();
-		
+
 		Shader.SetGlobalTexture(ShadowRT, shadowRT);
-		
 	}
 
 	private void CreateCurveLuts() {
-		CumulusLut          = new Texture2D(128, 1, TextureFormat.RFloat, false, true) {
-			wrapMode = TextureWrapMode.Clamp,
+		CumulusLut = new Texture2D(128, 1, TextureFormat.RFloat, false, true) {
+			wrapMode   = TextureWrapMode.Clamp,
 			filterMode = FilterMode.Bilinear,
 		};
 	}
@@ -426,7 +415,7 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetTexture(0, RendertextureOld, !useVRTA ? volumetricsRT_A : volumetricsRT_B);
 			volumetricsShader.SetTexture(1, Result,           useVRTA ? volumetricsRT_A : volumetricsRT_B);
 			volumetricsShader.SetTexture(1, RendertextureOld, !useVRTA ? volumetricsRT_A : volumetricsRT_B);
-			
+
 			volumetricsShader.SetTexture(2, ShadowRT, shadowRT);
 
 			volumetricsShader.SetVector(CamPos,
@@ -447,10 +436,10 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetVector(SphereCenter,
 			                            new Vector4(sphereCenter.position.x, sphereCenter.position.y,
 			                                        sphereCenter.position.z, 0.0f));
-			
-			
-			volumetricsShader.SetVector(CloudTypeStratus, stratus);
-			volumetricsShader.SetVector(CloudTypeCumulus, cumulus);
+
+
+			volumetricsShader.SetVector(CloudTypeStratus,      stratus);
+			volumetricsShader.SetVector(CloudTypeCumulus,      cumulus);
 			volumetricsShader.SetVector(CloudTypeCumulonimbus, cumulonimbus);
 
 			volumetricsShader.SetFloat(DensityMultiplier, densityMultiplier);
@@ -480,13 +469,13 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(DetailSpeed,       detailSpeed);
 			volumetricsShader.SetFloat(ShadowStepSize,    shadowStepSize);
 			volumetricsShader.SetFloat(ShadowConeSpread,  shadowConeSpread);
-			volumetricsShader.SetFloat(Coverage, coverage);
-			volumetricsShader.SetFloat(CurrentCloudType, currentType);
+			volumetricsShader.SetFloat(Coverage,          coverage);
+			volumetricsShader.SetFloat(CurrentCloudType,  currentType);
 			volumetricsShader.SetFloat(ShadowResolution1, shadowRT.width);
-			volumetricsShader.SetFloat(ShadowWorldSize, shadowWorldSize);
+			volumetricsShader.SetFloat(ShadowWorldSize,   shadowWorldSize);
 			Shader.SetGlobalFloat(WorldSize, shadowWorldSize);
 
-			volumetricsShader.SetInt(StepAmount, math.max(stepAmount, 1));
+			volumetricsShader.SetInt(StepAmount,  math.max(stepAmount, 1));
 			volumetricsShader.SetInt(PixelOffset, (int)currentPixel);
 			volumetricsShader.SetInt(ShadowSteps, shadowSteps);
 
@@ -499,8 +488,12 @@ public class NoiseController : MonoBehaviour {
 			var view = cam.worldToCameraMatrix;
 			proj[1, 1] = -proj[1, 1];
 			var vp = proj * view;
-			if (firstFrame) { oldProjectionMatrix = vp; firstFrame = false; }
-			volumetricsShader.SetMatrix(InvVp, vp.inverse);
+			if (firstFrame) {
+				oldProjectionMatrix = vp;
+				firstFrame          = false;
+			}
+
+			volumetricsShader.SetMatrix(InvVp,  vp.inverse);
 			volumetricsShader.SetMatrix(PrevVp, oldProjectionMatrix);
 
 			volumetricsShader.Dispatch(1, volumetricsRT_A.width / 8, volumetricsRT_A.height / 8, 1);
@@ -511,36 +504,38 @@ public class NoiseController : MonoBehaviour {
 			oldProjectionMatrix = vp;
 
 			Shader.SetGlobalTexture(VolumetricsTex, useVRTA ? volumetricsRT_A : volumetricsRT_B);
-			
+
 			useVRTA = !useVRTA;
 		}
 	}
 
 	#endregion
-	
+
 	#region Weather Functions
 
 	private void InitializeWeather() {
 		InitializeWeatherTexture();
 		DispatchWeather();
 	}
-	
+
 	private void InitializeWeatherTexture() {
-		weatherRenderTexture = new RenderTexture(512, 512, 0 , RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Linear);
+		weatherRenderTexture =
+			new RenderTexture(512, 512, 0, RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Linear);
 		weatherRenderTexture.enableRandomWrite = true;
-		weatherRenderTexture.wrapMode = TextureWrapMode.Repeat;
+		weatherRenderTexture.wrapMode          = TextureWrapMode.Repeat;
 		weatherRenderTexture.Create();
-		noiseShader.SetTexture(2,WeatherMap, weatherRenderTexture);
+		noiseShader.SetTexture(2, WeatherMap, weatherRenderTexture);
 		Shader.SetGlobalTexture(WeatherTexture, weatherRenderTexture);
 	}
 
-	private void DispatchWeather() {	
-		noiseShader.Dispatch(2, weatherRenderTexture.width    / 8, weatherRenderTexture.height / 8, 1);
+	private void DispatchWeather() {
+		noiseShader.Dispatch(2, weatherRenderTexture.width / 8, weatherRenderTexture.height / 8, 1);
 	}
-	
+
 	#endregion
+
 	#endregion
-	
+
 	#region public functions
 
 	public Texture GetTexture(int id) {
@@ -552,6 +547,6 @@ public class NoiseController : MonoBehaviour {
 			_ => perlinRenderTexture
 		};
 	}
-	
+
 	#endregion
 }
