@@ -201,7 +201,7 @@ float get_density(float3 worldPos, bool lowDetail = false)
     float3 perlin_world_pos = float3(worldPos.x / _NoiseSize + time * base_speed, worldPos.y * _SquishFactor / _NoiseSize, worldPos.z / _NoiseSize);
     float4 perlin = _PerlinTex.SampleLevel(sampler_PerlinTex, perlin_world_pos , 0);
     
-    float base = saturate(perlin.a - coverage - gradient - weather.r);
+    float base = saturate(perlin.a - coverage - gradient);
     float detail = perlin.r * 0.625 + perlin.g * 0.25 + perlin.b * 0.125;
 
     float result = remap(base,  (1 - detail) * detail_mult, 1.0, 0.0, 1.0);

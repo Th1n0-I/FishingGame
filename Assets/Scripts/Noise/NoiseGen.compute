@@ -174,7 +174,7 @@ float perlin_fbm(float3 pos, float freq, float gain, float lacunarity, int octav
 
 float worley_fbm(float3 pos, float freq, float gain, float lacunarity, int octaves)
 {
-    float result = 0;
+    float result = 1;
     
     float sum = 0;
     float amp = 1;
@@ -182,16 +182,14 @@ float worley_fbm(float3 pos, float freq, float gain, float lacunarity, int octav
     
     for (int x = 0; x < octaves; x++)
     {
-        result += saturate(1 - Worley(pos, (int)round(frequency))) * amp;
+        result *= (1 - Worley(pos, (int)round(frequency))  * amp);
         sum += amp;
         
         amp *= gain;
         frequency *= lacunarity;
     }
     
-    result /= sum;
-    
-    return result;
+    return saturate(result);
 }
 
 [numthreads(8,8,8)]
@@ -210,12 +208,8 @@ void GenPerlin (uint3 id : SV_DispatchThreadID)
     float perlinWorley = remap(
             pw_perlin,
             0,
-            1.0,pw_worley,1.0);
-    /*float4 result = float4(
-        (Worley(uvw, t1_w1_o1_size) * t1_w1_o1_weight + Worley(uvw, t1_w1_o2_size) * t1_w1_o2_weight + Worley(uvw, t1_w1_o3_size) * t1_w1_o3_weight) / (t1_w1_o1_weight + t1_w1_o2_weight + t1_w1_o3_weight), 
-        (Worley(uvw, t1_w2_o1_size) * t1_w2_o1_weight + Worley(uvw, t1_w2_o2_size) * t1_w2_o2_weight + Worley(uvw, t1_w2_o3_size) * t1_w2_o3_weight) / (t1_w2_o1_weight + t1_w2_o2_weight + t1_w2_o3_weight), 
-        (Worley(uvw, t1_w3_o1_size) * t1_w3_o1_weight + Worley(uvw, t1_w3_o2_size) * t1_w3_o2_weight + Worley(uvw, t1_w3_o3_size) * t1_w3_o3_weight) / (t1_w3_o1_weight + t1_w3_o2_weight + t1_w3_o3_weight),
-        perlinWorley);*/
+            0.5,pw_worley,1.0);
+    
     float4 result = float4(
         abs(pw_perlin),
         pw_worley,
