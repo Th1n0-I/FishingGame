@@ -11,7 +11,8 @@ using Random = UnityEngine.Random;
 [Serializable]
 class CloudType {
 	[SerializeField] private string prefix;
-	
+
+
 	public float          startAltitude;
 	public float          height;
 	public float          density;
@@ -23,8 +24,8 @@ class CloudType {
 	private bool      curvesDirty;
 
 	public void Init() {
-		floatsID = Shader.PropertyToID(prefix + "_floats");
-		shapeCurveID = Shader.PropertyToID(prefix + "_shape_lut");
+		floatsID       = Shader.PropertyToID(prefix + "_floats");
+		shapeCurveID   = Shader.PropertyToID(prefix + "_shape_lut");
 		densityCurveID = Shader.PropertyToID(prefix + "_density_lut");
 
 		shapeLut    = CreateLut();
@@ -40,14 +41,14 @@ class CloudType {
 			GenCurveLut(densityLut, densityCurve);
 			curvesDirty = false;
 		}
-		
+
 		cs.SetVector(floatsID, new Vector4(startAltitude, height, density, 0));
 		cs.SetTexture(0, shapeCurveID,   shapeLut);
 		cs.SetTexture(0, densityCurveID, densityLut);
 		cs.SetTexture(2, shapeCurveID,   shapeLut);
 		cs.SetTexture(2, densityCurveID, densityLut);
 	}
-	
+
 	private void GenCurveLut(Texture2D tex, AnimationCurve curve) {
 		var data = new float[128];
 		for (int i = 0; i < 128; i++) {
@@ -66,6 +67,26 @@ class CloudType {
 	}
 }
 
+[Serializable]
+class NoiseParams {
+	[SerializeField] private string prefix;
+
+	[SerializeField, Range(2, 128)] public float frequency;
+	[SerializeField, Range(0, 1)]   public float gain;
+	[SerializeField, Range(1, 3)]   public float lacunarity;
+	[SerializeField, Range(1, 8)]   public int   octaves;
+
+	private int floatsID;
+
+	public void Init() {
+		floatsID = Shader.PropertyToID(prefix + "_floats");
+	}
+
+	public void SetValues(ComputeShader cs) {
+		cs.SetVector(floatsID, new Vector4(frequency, gain, lacunarity, octaves));
+	}
+}
+
 public class NoiseController : MonoBehaviour {
 	[Header("Volumetrics")]
 	[Header("-Quality")]
@@ -81,7 +102,7 @@ public class NoiseController : MonoBehaviour {
 
 	[Header("-Settings")]
 	[SerializeField] private float coverage;
-	[SerializeField] private float currentType;
+	[SerializeField] private int   currentType = 3;
 	[SerializeField] private float fullDensityMult;
 	[SerializeField] private float densityMultiplier = 1.0f;
 	[SerializeField] private float fbmMult           = 1.0f;
@@ -132,33 +153,13 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField] private bool regenerateNoise = false;
 	[SerializeField] private bool constantlyGenerateNoise = false;
 	[Header("-Settings")]
-	[Header("--Perlin-Worley")]
-	[SerializeField, Range(2, 128)]
-	private float pwPerlinBaseFrequency;
-	[SerializeField, Range(1, 3)] private float pwPerlinLacunarity;
-	[SerializeField, Range(0, 1)] private float pwPerlinGain;
-	[SerializeField, Range(1, 8)] private int   pwPerlinOctaves;
+	[SerializeField] private NoiseParams perlinWorleyPerlin;
+	[SerializeField] private NoiseParams   perlinWorleyWorley;
+	[SerializeField] private NoiseParams   perlinWorley1;
+	[SerializeField] private NoiseParams   perlinWorley2;
+	[SerializeField] private NoiseParams   perlinWorley3;
+	private                  NoiseParams[] noiseParams;
 
-	[SerializeField, Range(2, 128)] private float pwWorleyBaseFrequency;
-	[SerializeField, Range(1, 3)]   private float pwWorleyLacunarity;
-	[SerializeField, Range(0, 1)]   private float pwWorleyGain;
-	[SerializeField, Range(1, 8)]   private int   pwWorleyOctaves;
-
-	[Header("--Texture 1 Worley 1")]
-	[SerializeField, Range(2, 128)] private float pWorley1BaseFrequency;
-	[SerializeField, Range(1, 3)] private float pWorley1Lacunarity;
-	[SerializeField, Range(0, 1)] private float pWorley1Gain;
-	[SerializeField, Range(1, 8)] private int   pWorley1Octaves;
-	[Header("--Texture 1 Worley 2")]
-	[SerializeField, Range(2, 128)] private float pWorley2BaseFrequency;
-	[SerializeField, Range(1, 3)] private float pWorley2Lacunarity;
-	[SerializeField, Range(0, 1)] private float pWorley2Gain;
-	[SerializeField, Range(1, 8)] private int   pWorley2Octaves;
-	[Header("--Texture 1 Worley 3")]
-	[SerializeField, Range(2, 128)] private float pWorley3BaseFrequency;
-	[SerializeField, Range(1, 3)] private float pWorley3Lacunarity;
-	[SerializeField, Range(0, 1)] private float pWorley3Gain;
-	[SerializeField, Range(1, 8)] private int   pWorley3Octaves;
 	[Header("--Texture 2 Worley")]
 	[SerializeField, Range(0, 128)] private float t2W1Size = 1.0f;
 	[SerializeField, Range(0, 128)] private float t2W2Size = 1.0f;
@@ -299,13 +300,13 @@ public class NoiseController : MonoBehaviour {
 	private void OnDisable() => RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
 
 	private void Start() {
-
 		cloudTypes = new CloudType[] { stratus, stratocumulus, cumulus };
+		noiseParams = new NoiseParams[] {perlinWorleyPerlin, perlinWorleyWorley, perlinWorley1, perlinWorley2, perlinWorley3 };
 
-		foreach (var v in cloudTypes) {
-			v.Init();
-		}
-	
+		foreach (var v in cloudTypes) v.Init();
+		foreach (var v in noiseParams) v.Init();
+		
+
 		minMaxValues = new ComputeBuffer(2, sizeof(int));
 
 		InitializeWeather();
@@ -356,36 +357,12 @@ public class NoiseController : MonoBehaviour {
 		noiseShader.SetBuffer(0, MinMaxBuffer, minMaxValues);
 		noiseShader.SetBuffer(1, MinMaxBuffer, minMaxValues);
 
-		noiseShader.SetFloat(PwPerlinBaseFrequencyGlobal, pwPerlinBaseFrequency);
-		noiseShader.SetFloat(PwPerlinLacunarityGlobal,    pwPerlinLacunarity);
-		noiseShader.SetFloat(PwPerlinGainGlobal,          pwPerlinGain);
-		noiseShader.SetInt(PwPerlinOctavesGlobal, pwPerlinOctaves);
-
-		noiseShader.SetFloat(PwWorleyBaseFrequencyGlobal, pwWorleyBaseFrequency);
-		noiseShader.SetFloat(PwWorleyLacunarityGlobal,    pwWorleyLacunarity);
-		noiseShader.SetFloat(PwWorleyGainGlobal,          pwWorleyGain);
-		noiseShader.SetInt(PwWorleyOctavesGlobal, pwWorleyOctaves);
-
-		noiseShader.SetFloat(PWorley1BaseFrequencyGlobal, pWorley1BaseFrequency);
-		noiseShader.SetFloat(PWorley1LacunarityGlobal,    pWorley1Lacunarity);
-		noiseShader.SetFloat(PWorley1GainGlobal,          pWorley1Gain);
-		noiseShader.SetInt(PWorley1OctavesGlobal, pWorley1Octaves);
-
-		noiseShader.SetFloat(PWorley2BaseFrequencyGlobal, pWorley2BaseFrequency);
-		noiseShader.SetFloat(PWorley2LacunarityGlobal,    pWorley2Lacunarity);
-		noiseShader.SetFloat(PWorley2GainGlobal,          pWorley2Gain);
-		noiseShader.SetInt(PWorley2OctavesGlobal, pWorley2Octaves);
-
-		noiseShader.SetFloat(PWorley3BaseFrequencyGlobal, pWorley3BaseFrequency);
-		noiseShader.SetFloat(PWorley3LacunarityGlobal,    pWorley3Lacunarity);
-		noiseShader.SetFloat(PWorley3GainGlobal,          pWorley3Gain);
-		noiseShader.SetInt(PWorley3OctavesGlobal, pWorley3Octaves);
+		foreach(var v in noiseParams) v.SetValues(noiseShader);
 
 		noiseShader.SetFloat(T2W1Size, t2W1Size);
 		noiseShader.SetFloat(T2W2Size, t2W2Size);
 		noiseShader.SetFloat(T2W3Size, t2W3Size);
 
-		
 
 		noiseShader.Dispatch(0, perlinRenderTexture.width    / 8, perlinRenderTexture.height / 8,
 		                     perlinRenderTexture.volumeDepth / 8);
@@ -535,7 +512,7 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(ShadowStepSize,    shadowStepSize);
 			volumetricsShader.SetFloat(ShadowConeSpread,  shadowConeSpread);
 			volumetricsShader.SetFloat(Coverage,          coverage);
-			volumetricsShader.SetFloat(CurrentCloudType,  currentType);
+			volumetricsShader.SetInt(CurrentCloudType, currentType);
 			volumetricsShader.SetFloat(ShadowResolution1, shadowRT.width);
 			volumetricsShader.SetFloat(ShadowWorldSize,   shadowWorldSize);
 			Shader.SetGlobalFloat(WorldSize, shadowWorldSize);
@@ -560,7 +537,7 @@ public class NoiseController : MonoBehaviour {
 
 			volumetricsShader.SetMatrix(InvVp,  vp.inverse);
 			volumetricsShader.SetMatrix(PrevVp, oldProjectionMatrix);
-			
+
 			foreach (var v in cloudTypes) v.SetValues(volumetricsShader);
 
 			volumetricsShader.Dispatch(1, volumetricsRT_A.width / 8, volumetricsRT_A.height / 8, 1);

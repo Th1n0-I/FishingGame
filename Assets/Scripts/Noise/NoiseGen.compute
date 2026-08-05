@@ -11,34 +11,33 @@ RWTexture2D<float4> weather_map;
 
 RWStructuredBuffer<int> min_max_buffer;
 
-float pw_perlin_base_frequency_global;
-float pw_perlin_lacunarity_global;
-float pw_perlin_gain_global;
-int pw_perlin_octaves_global;
-
-float pw_worley_base_frequency_global;
-float pw_worley_lacunarity_global;
-float pw_worley_gain_global;
-int pw_worley_octaves_global;
-
-float p_worley_1_base_frequency_global;
-float p_worley_1_lacunarity_global;
-float p_worley_1_gain_global;
-int p_worley_1_octaves_global;
-
-float p_worley_2_base_frequency_global;
-float p_worley_2_lacunarity_global;
-float p_worley_2_gain_global;
-int p_worley_2_octaves_global;
-
-float p_worley_3_base_frequency_global;
-float p_worley_3_lacunarity_global;
-float p_worley_3_gain_global;
-int p_worley_3_octaves_global;
+float4 perlin_worley_perlin_floats;
+float4 perlin_worley_worley_floats;
+float4 perlin_worley_1_floats;
+float4 perlin_worley_2_floats;
+float4 perlin_worley_3_floats;
 
 float w_worley_1_base_frequency_global;
 float w_worley_2_base_frequency_global;
 float w_worley_3_base_frequency_global;
+
+struct noise_parameters
+{
+    float frequency;
+    float gain;
+    float lacunarity;
+    int octaves;
+};
+
+noise_parameters Unpack(float4 v)
+{
+    noise_parameters p;
+    p.frequency = v.x;
+    p.gain = v.y;
+    p.lacunarity = v.z;
+    p.octaves = (int)round(v.w);
+    return p;
+}
 
 uint3 pcg3d(uint3 v)
 {
@@ -145,21 +144,21 @@ float remap(float v, float inMin, float inMax, float outMin, float outMax)
     return outMin + (v - inMin) / (inMax - inMin) * (outMax - outMin);
 }
 
-float perlin_fbm(float3 pos, float freq, float gain, float lacunarity, int octaves)
+float perlin_fbm(float3 pos, noise_parameters n)
 {
     float result = 0;
     
     float sum = 0;
     float amp = 1;
-    float frequency = freq;
+    float frequency = n.frequency;
     
-    for (int x = 0; x < octaves; x++)
+    for (int x = 0; x < n.octaves; x++)
     {
         result += remap(Perlin(pos, (int)round(frequency)), -0.75, 0.75, 0, 1) * amp;
         sum += amp;
         
-        amp *= gain;
-        frequency *= lacunarity;
+        amp *= n.gain;
+        frequency *= n.lacunarity;
     }
     
     result /= sum;
@@ -167,21 +166,21 @@ float perlin_fbm(float3 pos, float freq, float gain, float lacunarity, int octav
     return result;
 }
 
-float worley_fbm(float3 pos, float freq, float gain, float lacunarity, int octaves, float cell_radius)
+float worley_fbm(float3 pos, noise_parameters n, float cell_radius)
 {
     float result = 1;
     
     float sum = 0;
     float amp = 1;
-    float frequency = freq;
+    float frequency = n.frequency;
     
-    for (int x = 0; x < octaves; x++)
+    for (int x = 0; x < n.octaves; x++)
     {
         result *= (1 - Worley(pos, ((int)round(frequency)) / cell_radius)  * amp);
         sum += amp;
         
-        amp *= gain;
-        frequency *= lacunarity;
+        amp *= n.gain;
+        frequency *= n.lacunarity;
     }
     
     return saturate(result);
@@ -196,13 +195,13 @@ void GenPerlin (uint3 id : SV_DispatchThreadID)
     //float perlin = (Perlin(uvw, pw_perlin1_size) * pw_perlin1_weight + Perlin(uvw, pw_perlin2_size) * pw_perlin2_weight + Perlin(uvw, pw_perlin3_size) * pw_perlin3_weight) / (pw_perlin1_weight + pw_perlin2_weight + pw_perlin3_weight);
     
     
-    float pw_perlin = perlin_fbm(uvw, pw_perlin_base_frequency_global, pw_perlin_gain_global, pw_perlin_lacunarity_global, pw_perlin_octaves_global);
+    float pw_perlin = perlin_fbm(uvw, Unpack(perlin_worley_perlin_floats));
     
-    float pw_worley = worley_fbm(uvw, pw_worley_base_frequency_global, pw_worley_gain_global, pw_worley_lacunarity_global, pw_worley_octaves_global, 0.67);
+    float pw_worley = worley_fbm(uvw, Unpack(perlin_worley_worley_floats), 0.67);
 
-    float worley1 = worley_fbm(uvw, p_worley_1_base_frequency_global, p_worley_1_gain_global, p_worley_1_lacunarity_global, p_worley_1_octaves_global, 1.0);
-    float worley2 = worley_fbm(uvw, p_worley_2_base_frequency_global, p_worley_2_gain_global, p_worley_2_lacunarity_global, p_worley_2_octaves_global, 1.0);
-    float worley3 = worley_fbm(uvw, p_worley_3_base_frequency_global, p_worley_3_gain_global, p_worley_3_lacunarity_global, p_worley_3_octaves_global, 1.0);
+    float worley1 = worley_fbm(uvw, Unpack(perlin_worley_1_floats), 1.0);
+    float worley2 = worley_fbm(uvw, Unpack(perlin_worley_2_floats), 1.0);
+    float worley3 = worley_fbm(uvw, Unpack(perlin_worley_3_floats), 1.0);
     
     
     float perlinWorley = remap(
@@ -223,10 +222,9 @@ void GenPerlin (uint3 id : SV_DispatchThreadID)
 void GenWorley (uint3 id : SV_DispatchThreadID)
 {
     float3 uvw = (id.xyz + 0.5) / 32;
-    //float3 worley = float3(Worley(uvw, t2_w1_size), Worley(uvw, t2_w2_size), Worley(uvw, t2_w3_size));
+    float3 worley = float3(Worley(uvw, w_worley_1_base_frequency_global), Worley(uvw, w_worley_2_base_frequency_global), Worley(uvw, w_worley_3_base_frequency_global));
     
-    //WorleyTex[id.xyz] = saturate(float4(worley.xyz, 1.0));
-    WorleyTex[id.xyz] = float4(1.0, 1.0, 1.0, 1.0);
+    WorleyTex[id.xyz] = saturate(float4(1.0 - worley.xyz, 1.0));
 }
 
 [numthreads(8,8,1)]

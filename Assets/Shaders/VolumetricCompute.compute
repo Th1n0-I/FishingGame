@@ -65,7 +65,7 @@ float detail_speed;
 float shadow_step_size;
 float shadow_cone_spread;
 float coverage;
-float current_cloud_type;
+int current_cloud_type;
 float shadow_resolution;
 float shadow_world_size;
 int shadow_steps;
@@ -220,28 +220,67 @@ float get_density(float3 worldPos, bool lowDetail = false)
     float result = base;
     result = remap(saturate(result), 1 - saturate(texture1_worley * detail_fbm_mult), 1.0, 0.0, 1.0);
     return saturate(result * full_density_mult);*/
+    cloud_type cloud;
     
-    cloud_type cumulusCloud = Unpack(cumulus_floats);
+    float height_frac; 
+    float altitude = distance(worldPos, _SphereCenter) - _SphereMinRadius;
+    float shapeGradient;
+    float densityGradient;
+    
+    [branch]
+    switch (current_cloud_type)
+    {
+    case 1:
+        cloud = Unpack(stratus_floats);
+        height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
+        if (height_frac < 0.0 ) return 0;
+        shapeGradient = stratus_shape_lut.SampleLevel(sampler_stratus_shape_lut, float2(height_frac, 0.5), 0);
+        densityGradient = stratus_density_lut.SampleLevel(sampler_stratus_density_lut, float2(height_frac, 0.5), 0);
+        break;
+    case 2:
+        cloud = Unpack(stratocumulus_floats);
+        height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
+        if (height_frac < 0.0 ) return 0;
+        shapeGradient = stratocumulus_shape_lut.SampleLevel(sampler_stratocumulus_shape_lut, float2(height_frac, 0.5), 0);
+        densityGradient = stratocumulus_density_lut.SampleLevel(sampler_stratocumulus_density_lut, float2(height_frac, 0.5), 0);
+        break;
+    case 3:
+        cloud = Unpack(cumulus_floats);
+        height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
+        if (height_frac < 0.0 ) return 0;
+        shapeGradient = cumulus_shape_lut.SampleLevel(sampler_cumulus_shape_lut, float2(height_frac, 0.5), 0);
+        densityGradient = cumulus_density_lut.SampleLevel(sampler_cumulus_density_lut, float2(height_frac, 0.5), 0);
+        break;
+    default:
+        cloud = Unpack(stratus_floats);
+        height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
+        if (height_frac < 0.0 || height_frac > 1.0) return 0;
+        shapeGradient = stratus_shape_lut.SampleLevel(sampler_stratus_shape_lut, float2(height_frac, 0.5), 0);
+        densityGradient = stratus_density_lut.SampleLevel(sampler_stratus_density_lut, float2(height_frac, 0.5), 0);
+        break;
+    }
 
     float4 weather = weather_map.SampleLevel(sampler_weather_map, worldPos.xz / 16000, 0);
     
-    float height_frac = (worldPos.y - cumulusCloud.start_altitude) / (cumulusCloud.end_altitude - cumulusCloud.start_altitude);
-    if (height_frac > 1.0 || height_frac < 0.0) return 0.0;
-    float shapeGradient = cumulus_shape_lut.SampleLevel(sampler_cumulus_shape_lut, float2(height_frac, 0.5), 0);
-    float densityGradient = cumulus_density_lut.SampleLevel(sampler_cumulus_density_lut, float2(height_frac, 0.5), 0);
-
+    if ((1 - coverage) + weather.r >= 1.0) return 0;
 
     float3 perlin_world_pos = float3(worldPos.x / _NoiseSize + time * base_speed, worldPos.y * _SquishFactor / _NoiseSize, worldPos.z / _NoiseSize);
     float4 perlin = _PerlinTex.SampleLevel(sampler_PerlinTex, perlin_world_pos , 0);
+    float detail = perlin.r * 0.625 + perlin.g * 0.25 + perlin.b * 0.125;
     
     //float base = saturate(perlin.a - coverage - gradient - weather.r);
-    float base = perlin.a * shapeGradient;
+    float base = perlin.a;
+    base = remap(base,  (1 - detail) * detail_fbm_mult, 1.0, 0.0, 1.0);
+    base = base * shapeGradient;
     base = saturate(remap(base, saturate((1 - coverage) + weather.r), 1.0, 0.0, 1.0));
-    float detail = perlin.r * 0.625 + perlin.g * 0.25 + perlin.b * 0.125;
-    float result = remap(base,  (1 - detail) * detail_mult, 1.0, 0.0, 1.0);
+    float3 low_quality_detail_rgb = _WorleyTex.SampleLevel(sampler_WorleyTex, worldPos / _DetailSize + time * detail_speed, 0);
+    float low_quality_detail = low_quality_detail_rgb.r * 0.625 + low_quality_detail_rgb.g * 0.25 + low_quality_detail_rgb.b * 0.125;
+    low_quality_detail = lerp(low_quality_detail, 1 - low_quality_detail, saturate(height_frac * 10));
+    float result = remap(base, low_quality_detail * detail_mult, 1.0, 0.0, 1.0);
     
     
-    return max(result * full_density_mult * cumulusCloud.density * densityGradient, 0.0);
+    
+    return max(result * full_density_mult * cloud.density * densityGradient, 0.0);
 }
 
 float2 get_box_bounds(float3 worldPos, float3 rayDir)
