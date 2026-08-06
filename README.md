@@ -6,7 +6,7 @@
 > [!IMPORTANT]
 > For this ship I have only included volumetric clouds since I need gold for flight grants and a ticket to Macondo <3. I am unsure if there will be a game or if the project will be fully rebranded to volumetric clouds, but for this ship imagine that it's just volumetric clouds.
 
-[clouds](https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExNjY5ZmtydHUzMng0NGsyeTlmdDdsOXhyMGR5YTdxNm0zczh0b2cwOSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/3UxTNwlcDscWWowugL/giphy.gif)
+![](gif.gif)
 
 ## How it works!
 By sending a ray from the camera out towards the direction you're looking and sampling density at multiple points, a cloud can be formed! 
