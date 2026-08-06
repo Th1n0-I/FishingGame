@@ -21,6 +21,12 @@ It also has support for cloud types which takes in a start altitude, height, den
 
 The biggest difficulty in this project was getting the clouds to have the right shape. It took many hours of experimenting with noise following different tutorials until I finally got decent shapes. Even after all this time I am not completely happy with it and will continue experimenting to make sure it looks exactly how I want it to look.
 
+## Performance
+
+I was able to get ~120 fps while looking at the clouds with 60 steps, which is what the demo uses using my RX 6600.
+
+When using temporal upscaling (although it is broken I believe the performance is about what you'd expect with it working) I get around 300 fps with 60 steps.
+
 ## Featureset
 
 - [x] Simple customizability
