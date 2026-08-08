@@ -16,6 +16,7 @@ class CloudType {
 	public float          startAltitude;
 	public float          height;
 	public float          density;
+	public float          coverage;
 	public AnimationCurve shapeCurve;
 	public AnimationCurve densityCurve;
 
@@ -42,7 +43,7 @@ class CloudType {
 			curvesDirty = false;
 		}
 
-		cs.SetVector(floatsID, new Vector4(startAltitude, height, density, 0));
+		cs.SetVector(floatsID, new Vector4(startAltitude, height, density, coverage));
 		cs.SetTexture(0, shapeCurveID,   shapeLut);
 		cs.SetTexture(0, densityCurveID, densityLut);
 		cs.SetTexture(2, shapeCurveID,   shapeLut);
@@ -132,6 +133,7 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField] private float cumulusYMax     = 2500f;
 	[SerializeField] private float baseSpeed;
 	[SerializeField] private float detailSpeed;
+	[SerializeField] private float weatherSpeed;
 	[SerializeField] private bool  combineBounds = true;
 	[SerializeField] private Color fogColor;
 	[SerializeField] private Color fogColorNight;
@@ -158,6 +160,7 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField] private NoiseParams   perlinWorley1;
 	[SerializeField] private NoiseParams   perlinWorley2;
 	[SerializeField] private NoiseParams   perlinWorley3;
+	[SerializeField] private NoiseParams   weatherNoise;
 	private                  NoiseParams[] noiseParams;
 
 	[Header("--Texture 2 Worley")]
@@ -291,6 +294,7 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int PWorley3LacunarityGlobal    = Shader.PropertyToID("p_worley_3_lacunarity_global");
 	private static readonly int PWorley3GainGlobal          = Shader.PropertyToID("p_worley_3_gain_global");
 	private static readonly int PWorley3OctavesGlobal       = Shader.PropertyToID("p_worley_3_octaves_global");
+	private static readonly int WeatherSpeed                = Shader.PropertyToID("weather_speed");
 
 	#endregion
 
@@ -323,6 +327,7 @@ public class NoiseController : MonoBehaviour {
 
 	private void Update() {
 		if (!regenerateNoise && !constantlyGenerateNoise) return;
+		DispatchWeather();
 		DispatchNoise();
 		regenerateNoise = false;
 	}
@@ -509,6 +514,7 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(Time,              UnityEngine.Time.time);
 			volumetricsShader.SetFloat(BaseSpeed,         baseSpeed);
 			volumetricsShader.SetFloat(DetailSpeed,       detailSpeed);
+			volumetricsShader.SetFloat(WeatherSpeed, weatherSpeed);
 			volumetricsShader.SetFloat(ShadowStepSize,    shadowStepSize);
 			volumetricsShader.SetFloat(ShadowConeSpread,  shadowConeSpread);
 			volumetricsShader.SetFloat(Coverage,          coverage);
@@ -558,6 +564,7 @@ public class NoiseController : MonoBehaviour {
 	#region Weather Functions
 
 	private void InitializeWeather() {
+		weatherNoise.Init();
 		InitializeWeatherTexture();
 		DispatchWeather();
 	}
@@ -577,7 +584,14 @@ public class NoiseController : MonoBehaviour {
 		minMaxValues.SetData(minMax);
 
 		noiseShader.SetBuffer(2, MinMaxBuffer, minMaxValues);
+		
+		weatherNoise.SetValues(noiseShader);
+		
 		noiseShader.Dispatch(2, weatherRenderTexture.width / 8, weatherRenderTexture.height / 8, 1);
+		
+		int[] readBuffer = new int[2];
+		minMaxValues.GetData(readBuffer);
+		Debug.Log(readBuffer[0] / 10000.0f + " " + readBuffer[1] / 10000.0f);
 	}
 
 	#endregion

@@ -33,7 +33,7 @@ Material:
         m_Offset: {x: 8.07, y: 0}
     m_Ints: []
     m_Floats:
-    - _Channel: 3
+    - _Channel: 0
     - _Slice: 0.288
     m_Colors: []
   m_BuildTextureStacks: []

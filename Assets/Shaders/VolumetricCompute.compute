@@ -62,6 +62,7 @@ float detail_weight2;
 float detail_weight3;
 float base_speed;
 float detail_speed;
+float weather_speed;
 float shadow_step_size;
 float shadow_cone_spread;
 float coverage;
@@ -115,27 +116,53 @@ SamplerState sampler_stratocumulus_density_lut;
 struct cloud_type
 {
     float start_altitude;
+    float coverage;
     float end_altitude;
     float height;
     float density;
 };
 
-cloud_type Unpack(float4 v)
+cloud_type unpack(float4 v)
 {
     cloud_type c;
     c.start_altitude = v.x;
     c.end_altitude = v.x + v.y;
     c.height = v.y;
     c.density = v.z;
+    c.coverage = v.w;
     return c;
 }
 
-static const uint2 pixel_shuffle[16] = {{0,0},{2,2},{2,0},{0,2},{1,1},{3,3},{3,1},{1,3},{1,0},{3,2},{3,0},{1,2},{0,1},{2,3},{2,1},{0,3}};
+cloud_type unpack_lerp(float4 a, float4 b, float t)
+{
+    cloud_type c;
+    c.start_altitude = lerp(a.x, b.x, t);
+    c.end_altitude = lerp(a.x + a.y, b.x + b.y, t);
+    c.height = lerp(a.y, b.y, t);
+    c.density = lerp(a.z, b.z, t);
+    c.coverage = lerp(a.w, b.w, t);
+    return c;
+}
+
+float gradient_lerp(Texture2D<float> a, SamplerState a_sampler_state, Texture2D<float> b, SamplerState b_sampler_state,
+                    float2 uv, float t)
+{
+    float a_value = a.SampleLevel(a_sampler_state, uv, 0);
+    float b_value = b.SampleLevel(b_sampler_state, uv, 0);
+
+    float result = lerp(a_value, b_value, t);
+    return result;
+}
+
+static const uint2 pixel_shuffle[16] = {
+    {0, 0}, {2, 2}, {2, 0}, {0, 2}, {1, 1}, {3, 3}, {3, 1}, {1, 3}, {1, 0}, {3, 2}, {3, 0}, {1, 2}, {0, 1}, {2, 3},
+    {2, 1}, {0, 3}
+};
 
 float ign(float2 p)
 {
     float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
-    return frac( magic.z * frac(dot(p,magic.xy)) );
+    return frac(magic.z * frac(dot(p, magic.xy)));
 }
 
 float henyey_greenstein_old(float g, float costh)
@@ -198,7 +225,7 @@ float get_density(float3 worldPos, bool lowDetail = false)
     
     if (base_shape_with_coverage <= _DensityThreshold) return 0;
     return base_shape_with_coverage * full_density_mult;*/
-    
+
     /*float height_frac = (worldPos.y - cumulus_y_min) / (cumulus_y_max - cumulus_y_min);
     float4 g = lerp(cloud_type_stratus, cloud_type_cumulus, saturate(current_cloud_type * 2.0));
     g = lerp(g, cloud_type_cumulonimbus, saturate(current_cloud_type * 2.0 - 1.0));
@@ -221,77 +248,98 @@ float get_density(float3 worldPos, bool lowDetail = false)
     result = remap(saturate(result), 1 - saturate(texture1_worley * detail_fbm_mult), 1.0, 0.0, 1.0);
     return saturate(result * full_density_mult);*/
     cloud_type cloud;
-    
-    float height_frac; 
-    float altitude = distance(worldPos, _SphereCenter) - _SphereMinRadius;
+
+    float4 weather = weather_map.SampleLevel(sampler_weather_map, worldPos.xz / 128000 + weather_speed * time, 0);
+    float sampled_cloud_type = weather.g * 2;
+    float height_frac;
+    //float altitude = distance(worldPos, _SphereCenter) - _SphereMinRadius;
+    float altitude = worldPos.y;
     float shapeGradient;
     float densityGradient;
-    
-    [branch]
-    switch (current_cloud_type)
+
+    if (sampled_cloud_type == 0)
     {
-    case 1:
-        cloud = Unpack(stratus_floats);
+        cloud = unpack(stratus_floats);
         height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
-        if (height_frac < 0.0 ) return 0;
+        if (height_frac < 0.0) return 0;
         shapeGradient = stratus_shape_lut.SampleLevel(sampler_stratus_shape_lut, float2(height_frac, 0.5), 0);
         densityGradient = stratus_density_lut.SampleLevel(sampler_stratus_density_lut, float2(height_frac, 0.5), 0);
-        break;
-    case 2:
-        cloud = Unpack(stratocumulus_floats);
+    }
+    else if (sampled_cloud_type == 1)
+    {
+        cloud = unpack(stratocumulus_floats);
         height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
-        if (height_frac < 0.0 ) return 0;
-        shapeGradient = stratocumulus_shape_lut.SampleLevel(sampler_stratocumulus_shape_lut, float2(height_frac, 0.5), 0);
-        densityGradient = stratocumulus_density_lut.SampleLevel(sampler_stratocumulus_density_lut, float2(height_frac, 0.5), 0);
-        break;
-    case 3:
-        cloud = Unpack(cumulus_floats);
+        if (height_frac < 0.0) return 0;
+        shapeGradient = stratocumulus_shape_lut.SampleLevel(sampler_stratocumulus_shape_lut, float2(height_frac, 0.5),
+                                                            0);
+        densityGradient = stratocumulus_density_lut.SampleLevel(sampler_stratocumulus_density_lut,
+                                                                float2(height_frac, 0.5), 0);
+    }
+    else if (sampled_cloud_type == 2)
+    {
+        cloud = unpack(cumulus_floats);
         height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
-        if (height_frac < 0.0 ) return 0;
+        if (height_frac < 0.0) return 0;
         shapeGradient = cumulus_shape_lut.SampleLevel(sampler_cumulus_shape_lut, float2(height_frac, 0.5), 0);
         densityGradient = cumulus_density_lut.SampleLevel(sampler_cumulus_density_lut, float2(height_frac, 0.5), 0);
-        break;
-    default:
-        cloud = Unpack(stratus_floats);
-        height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
-        if (height_frac < 0.0 || height_frac > 1.0) return 0;
-        shapeGradient = stratus_shape_lut.SampleLevel(sampler_stratus_shape_lut, float2(height_frac, 0.5), 0);
-        densityGradient = stratus_density_lut.SampleLevel(sampler_stratus_density_lut, float2(height_frac, 0.5), 0);
-        break;
     }
 
-    float4 weather = weather_map.SampleLevel(sampler_weather_map, worldPos.xz / 16000, 0);
-    
+    else if (sampled_cloud_type < 1)
+    {
+        float t = sampled_cloud_type;
+        cloud = unpack_lerp(stratus_floats, stratocumulus_floats, t);
+        height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
+        if (height_frac < 0.0) return 0;
+        shapeGradient = stratus_shape_lut.SampleLevel(sampler_stratus_shape_lut, float2(height_frac, 0.5), 0);
+        densityGradient = stratus_density_lut.SampleLevel(sampler_stratus_density_lut, float2(height_frac, 0.5), 0);
+    }
+    else if (sampled_cloud_type < 2)
+    {
+        float t = sampled_cloud_type - 1;
+        cloud = unpack_lerp(stratocumulus_floats, cumulus_floats, t);
+        height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
+        if (height_frac < 0.0) return 0;
+        shapeGradient = gradient_lerp(stratocumulus_shape_lut, sampler_stratocumulus_shape_lut,
+                                      cumulus_shape_lut, sampler_cumulus_shape_lut, float2(height_frac, 0.5), t);
+        densityGradient = gradient_lerp(stratocumulus_density_lut, sampler_stratocumulus_density_lut,
+                                        cumulus_density_lut, sampler_cumulus_density_lut, float2(height_frac, 0.5), t);
+    }
+
+
     if ((1 - coverage) + weather.r >= 1.0) return 0;
 
-    float3 perlin_world_pos = float3(worldPos.x / _NoiseSize + time * base_speed, worldPos.y * _SquishFactor / _NoiseSize, worldPos.z / _NoiseSize);
-    float4 perlin = _PerlinTex.SampleLevel(sampler_PerlinTex, perlin_world_pos , 0);
+    float3 perlin_world_pos = float3(worldPos.x / _NoiseSize + time * base_speed,
+                                     worldPos.y * _SquishFactor / _NoiseSize, worldPos.z / _NoiseSize);
+    float4 perlin = _PerlinTex.SampleLevel(sampler_PerlinTex, perlin_world_pos, 0);
     float detail = perlin.r * 0.625 + perlin.g * 0.25 + perlin.b * 0.125;
-    
+
     //float base = saturate(perlin.a - coverage - gradient - weather.r);
     float base = perlin.a;
-    base = remap(base,  (1 - detail) * detail_fbm_mult, 1.0, 0.0, 1.0);
+    base = remap(base, (1 - detail) * detail_fbm_mult, 1.0, 0.0, 1.0);
     base = base * shapeGradient;
-    base = saturate(remap(base, saturate((1 - coverage) + weather.r), 1.0, 0.0, 1.0));
-    float3 low_quality_detail_rgb = _WorleyTex.SampleLevel(sampler_WorleyTex, worldPos / _DetailSize + time * detail_speed, 0);
-    float low_quality_detail = low_quality_detail_rgb.r * 0.625 + low_quality_detail_rgb.g * 0.25 + low_quality_detail_rgb.b * 0.125;
+    base = saturate(remap(base, saturate((1 - coverage) + weather.r - cloud.coverage), 1.0, 0.0, 1.0));
+    float3 low_quality_detail_rgb = _WorleyTex.SampleLevel(sampler_WorleyTex,
+                                                           worldPos / _DetailSize + time * detail_speed, 0);
+    float low_quality_detail = low_quality_detail_rgb.r * 0.625 + low_quality_detail_rgb.g * 0.25 +
+        low_quality_detail_rgb.b * 0.125;
     low_quality_detail = lerp(low_quality_detail, 1 - low_quality_detail, saturate(height_frac * 10));
     float result = remap(base, low_quality_detail * detail_mult, 1.0, 0.0, 1.0);
-    
-    
-    
+
+
     return max(result * full_density_mult * cloud.density * densityGradient, 0.0);
 }
 
 float2 get_box_bounds(float3 worldPos, float3 rayDir)
 {
-    float3 tl = float3((_MinBounds.x - worldPos.x) / rayDir.x, (_MinBounds.y - worldPos.y) / rayDir.y, (_MinBounds.z - worldPos.z) / rayDir.z);
-    float3 th = float3((_MaxBounds.x - worldPos.x) / rayDir.x, (_MaxBounds.y - worldPos.y) / rayDir.y, (_MaxBounds.z - worldPos.z) / rayDir.z);
-    
-    float tc = max(min(tl.x, th.x), max(min(tl.y, th.y),min(tl.z, th.z)));
-    float tf = min(max(tl.x, th.x), min(max(tl.y, th.y),max(tl.z, th.z)));
-    
-    return float2(tc,tf);
+    float3 tl = float3((_MinBounds.x - worldPos.x) / rayDir.x, (_MinBounds.y - worldPos.y) / rayDir.y,
+                       (_MinBounds.z - worldPos.z) / rayDir.z);
+    float3 th = float3((_MaxBounds.x - worldPos.x) / rayDir.x, (_MaxBounds.y - worldPos.y) / rayDir.y,
+                       (_MaxBounds.z - worldPos.z) / rayDir.z);
+
+    float tc = max(min(tl.x, th.x), max(min(tl.y, th.y), min(tl.z, th.z)));
+    float tf = min(max(tl.x, th.x), min(max(tl.y, th.y), max(tl.z, th.z)));
+
+    return float2(tc, tf);
 }
 
 float2 get_sphere_bounds(float3 worldPos, float3 rayDir, float radius)
@@ -302,7 +350,7 @@ float2 get_sphere_bounds(float3 worldPos, float3 rayDir, float radius)
     if (h <= 0) return float2(-1, -1);
     float t1 = (-b - sqrt(h)) / 2;
     float t2 = (-b + sqrt(h)) / 2;
-    return float2(t1,t2);
+    return float2(t1, t2);
 }
 
 float get_bounds_intersect(float3 pos, float3 rayDir)
@@ -310,28 +358,28 @@ float get_bounds_intersect(float3 pos, float3 rayDir)
     float2 sphere1intersect = get_sphere_bounds(pos, rayDir, _SphereMinRadius);
     float2 sphere2intersect = get_sphere_bounds(pos, rayDir, _SphereMaxRadius);
     float2 boxIntersect = get_box_bounds(pos, rayDir);
-       
-        
+
+
     float tEnter = max(0.0, sphere2intersect.x);
     float tExit = sphere2intersect.y;
-        
+
     // The sphere is behind the player.
     if (tExit <= tEnter) return -1;
-        
+
     if (combine_bounds)
     {
         tEnter = max(tEnter, boxIntersect.x);
         tExit = min(tExit, boxIntersect.y);
         if (tExit <= tEnter) return -1;
     }
-        
+
     float2 seg0 = float2(tEnter, tExit);
-    
-        
+
+
     float innerA = sphere1intersect.x;
     float innerB = sphere1intersect.y;
     bool innerHits = innerB > 0 && innerA < innerB;
-        
+
     if (innerHits)
     {
         innerA = max(innerA, tEnter);
@@ -340,11 +388,11 @@ float get_bounds_intersect(float3 pos, float3 rayDir)
         {
             bool clipsStart = innerA <= tEnter;
             bool clipsEnd = innerB >= tExit;
-            if (clipsStart && clipsEnd) return - 1; // The box is fully inside the smaller sphere.
+            if (clipsStart && clipsEnd) return -1; // The box is fully inside the smaller sphere.
             else if (clipsStart) seg0.x = innerB;
         }
     }
-    
+
     return seg0.x;
 }
 
@@ -355,49 +403,52 @@ float3 calculateWorldPos(float2 uv, float depth, float4x4 inv_vp)
     return worldPos.xyz / worldPos.w;
 }
 
-float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogCol, float stepSize, int maxSteps, float viewLength, float transmittance, float2 id)
+float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogCol, float stepSize, int maxSteps,
+                float viewLength, float transmittance, float2 id)
 {
     float sun_elevation = -_LightDirection.y;
     float t = smoothstep(0.0, 0.25, sun_elevation);
     float3 light_contribution = lerp(light_contribution_sunset.rgb, light_contribution_day.rgb, t);
-    float distanceTravelled = ign(id) * stepSize;
+    float distanceTravelled = ign(id) * stepSize * 2;
     float maxDist = distance(startPoint, endPoint);
     if (distance(startPoint, camPoint) > viewLength) return float4(fogCol, transmittance);
     if (distance(endPoint, camPoint) > viewLength)
-        {
-            maxDist = viewLength - distance(startPoint, camPoint);
-            float2 uv = float2((float)id.x * TextureDivide / ScreenWidth, (float)id.y * TextureDivide / ScreenHeight);
-            endPoint = calculateWorldPos(uv, viewLength, _InvVP);
-        }
-    
+    {
+        maxDist = viewLength - distance(startPoint, camPoint);
+        float2 uv = float2((float)id.x * TextureDivide / ScreenWidth, (float)id.y * TextureDivide / ScreenHeight);
+        endPoint = calculateWorldPos(uv, viewLength, _InvVP);
+    }
+
     float3 rayDir = normalize(endPoint - startPoint);
     int steps = 0;
     float3 fogColor = fogCol;
-    
+
     while (distanceTravelled < maxDist && steps < maxSteps && transmittance > 0.0001)
     {
-        
-        
-        
         float3 worldPos = startPoint + rayDir * distanceTravelled;
         distanceTravelled += stepSize;
         steps++;
         float density = get_density(worldPos);
         if (density <= 0) continue;
         float3 shadowRayDir = normalize(-_LightDirection.xyz);
-        float3 shadowRayEntryPos = worldPos + ign(id.xy);
+        float3 shadowRayEntryPos = worldPos + ign(id.xy) * shadow_step_size;
         float shadowTransmittance = 1;
         float shadow_distance_travelled = 0;
-        float3 right = normalize(cross(shadowRayDir, float3(0,1,0)));
+        float3 right = normalize(cross(shadowRayDir, float3(0, 1, 0)));
         float3 up = normalize(cross(shadowRayDir, right));
-        float2 a[6] = {normalize(float2(-0.6,0.94)),normalize(float2(-0.97,-0.28)),normalize(float2(0.19,-0.71)),normalize(float2(-0.73,-0.2)),normalize(float2(0.42,-0.38)),normalize(float2(-0.81,0.19))};
-                    
+        float2 a[6] = {
+            normalize(float2(-0.6, 0.94)), normalize(float2(-0.97, -0.28)), normalize(float2(0.19, -0.71)),
+            normalize(float2(-0.73, -0.2)), normalize(float2(0.42, -0.38)), normalize(float2(-0.81, 0.19))
+        };
+
         for (int i = 1; i <= 6; i++)
         {
             //float step_size = i * shadow_step_size;
             float step_size = shadow_step_size * (i == 6 ? 3 : 1);
             shadow_distance_travelled += step_size;
-            float3 shadowRayPos = shadowRayEntryPos + shadowRayDir * shadow_distance_travelled + right * shadow_distance_travelled * shadow_cone_spread * a[i-1].x + up * shadow_distance_travelled * shadow_cone_spread * a[i-1].y;
+            float3 shadowRayPos = shadowRayEntryPos + shadowRayDir * shadow_distance_travelled + right *
+                shadow_distance_travelled * shadow_cone_spread * a[i - 1].x + up * shadow_distance_travelled *
+                shadow_cone_spread * a[i - 1].y;
             float shadowDensity;
             if (i < 6) shadowDensity = get_density(shadowRayPos) * step_size;
             else shadowDensity = get_density(shadowRayPos, true) * step_size;
@@ -406,13 +457,14 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
                 shadowTransmittance *= exp(-shadowDensity);
             }
         }
-                    
+
         float d = density * stepSize;
         float beer = exp(-d);
         float beer_powder = exp(-d) * (1 - exp(-2 * d));
         //fogColor.rgb += transmittance * _MainLightColor.rgb * _LightContribution.rgb * HenyeyGreenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) * density * shadowTransmittance * stepSize;
         //fogColor.rgb += transmittance * _MainLightColor.rgb * max(0.9 * henyey_greenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))), 0.1 * henyey_greenstein(-0.3,dot(rayDir, -normalize(_LightDirection.xyz)))) * shadowTransmittance * light_contribution * beer_powder * smoothstep(-0.1, 0.05, sun_elevation); 
-        float light_energy = exp(-d) * (1 - exp(-2 * d)) * 2 * henyey_greenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) * shadowTransmittance;
+        float light_energy = exp(-d) * (1 - exp(-2 * d)) * 2 * henyey_greenstein(
+            _LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) * shadowTransmittance;
         fogColor.rgb += transmittance * light_contribution_day.rgb * light_energy;
         transmittance *= beer;
     }
@@ -420,54 +472,53 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
 }
 
 [numthreads(8,8,1)]
-void CSMain (uint3 id : SV_DispatchThreadID)
+void CSMain(uint3 id : SV_DispatchThreadID)
 {
     if (use_temporal_upscaling) id.xy = id.xy * 4 + pixel_shuffle[pixel_offset];
-    
+
     Result[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
-    
+
     int x = (id.x + 0.5) * TextureDivide;
     int y = (id.y + 0.5) * TextureDivide;
     float2 uv = float2((float)x / ScreenWidth, (float)y / ScreenHeight);
-    
-    
+
+
     float depth = DepthTex.SampleLevel(sampler_DepthTex, uv, 0).r;
     float3 worldPos = calculateWorldPos(uv, depth, _InvVP);
     float3 entryPos = _CamPos.xyz;
     float3 viewDir = worldPos - entryPos;
     float viewLength = length(viewDir) >= 4900 ? _MaxDistance : length(viewDir);
     float3 rayDir = normalize(viewDir);
-    
-    
-    
+
+
     if (_UseBoundingSphere)
     {
         float2 sphere1intersect = get_sphere_bounds(entryPos, rayDir, _SphereMinRadius);
         float2 sphere2intersect = get_sphere_bounds(entryPos, rayDir, _SphereMaxRadius);
         float2 boxIntersect = get_box_bounds(entryPos, rayDir);
-       
-        
+
+
         float tEnter = max(0.0, sphere2intersect.x);
         float tExit = sphere2intersect.y;
-        
+
         // The sphere is behind the player.
         if (tExit <= tEnter) return;
-        
+
         if (combine_bounds)
         {
             tEnter = max(tEnter, boxIntersect.x);
             tExit = min(tExit, boxIntersect.y);
             if (tExit <= tEnter) return;
         }
-        
+
         float2 seg0 = float2(tEnter, tExit);
         float2 seg1 = float2(0.0, 0.0);
         bool split = false;
-        
+
         float innerA = sphere1intersect.x;
         float innerB = sphere1intersect.y;
         bool innerHits = innerB > 0 && innerA < innerB;
-        
+
         if (innerHits)
         {
             innerA = max(innerA, tEnter);
@@ -479,23 +530,28 @@ void CSMain (uint3 id : SV_DispatchThreadID)
                 if (clipsStart && clipsEnd) return; // The box is fully inside the smaller sphere.
                 else if (clipsStart) seg0.x = innerB;
                 else if (clipsEnd) seg0.y = innerA;
-                else { seg0.y = innerA; seg1 = float2(innerB, tExit); split = true;}
+                else
+                {
+                    seg0.y = innerA;
+                    seg1 = float2(innerB, tExit);
+                    split = true;
+                }
             }
         }
-        
+
         float t = smoothstep(-0.1, 0.05, -_LightDirection.y);
         float steps = split ? _StepAmount * 0.5 : _StepAmount;
         float3 a0 = entryPos + rayDir * seg0.x;
         float3 b0 = entryPos + rayDir * seg0.y;
-        float4 res = raymarch(a0, b0, entryPos, lerp(fog_base_color_night.rgb, fog_base_color_day.rgb, t), distance(a0,b0) / steps, steps, viewLength, 1.0, id.xy);
+        float4 res = raymarch(a0, b0, entryPos, lerp(fog_base_color_night.rgb, fog_base_color_day.rgb, t),
+                              distance(a0, b0) / steps, steps, viewLength, 1.0, id.xy);
         if (split)
         {
             float3 a1 = entryPos + rayDir * seg1.x;
             float3 b1 = entryPos + rayDir * seg1.y;
-            res = raymarch(a1,b1,entryPos,res.rgb, distance(a1,b1)/steps, steps, viewLength, res.a, id.xy);
+            res = raymarch(a1, b1, entryPos, res.rgb, distance(a1, b1) / steps, steps, viewLength, res.a, id.xy);
         }
         Result[id.xy] = float4(res.rgb, 1.0 - saturate((res.a <= 0.0001 ? 0 : res.a)));
-        
     }
 }
 
@@ -507,16 +563,24 @@ void Reproject(uint3 id : SV_DispatchThreadID)
     float3 rayDir = normalize(p - _CamPos.xyz);
 
     float cloudEntry = get_bounds_intersect(_CamPos.xyz, rayDir);
-    
-    if (cloudEntry <= 0) {Result[id.xy] = rendertexture_old[id.xy]; return;}
-    
+
+    if (cloudEntry <= 0)
+    {
+        Result[id.xy] = rendertexture_old[id.xy];
+        return;
+    }
+
     float3 cloud_pos = _CamPos.xyz + rayDir * cloudEntry;
     float4 prev_clip = mul(prev_vp, float4(cloud_pos, 1.0));
     float2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
-    
+
     bool valid = prev_clip.w > 0 && all(prev_uv >= 0) && all(prev_uv <= 1);
-    
-    if (valid) {Result[id.xy] = rendertexture_old.SampleLevel(sampler_rendertexture_old, prev_uv, 0); return;}
+
+    if (valid)
+    {
+        Result[id.xy] = rendertexture_old.SampleLevel(sampler_rendertexture_old, prev_uv, 0);
+        return;
+    }
     Result[id.xy] = rendertexture_old.SampleLevel(sampler_rendertexture_old, clamp(prev_uv, 0, 1), 0);
 }
 
@@ -526,23 +590,23 @@ void CloudsShadows(uint3 id : SV_DispatchThreadID)
     float2 worldXZ = _CamPos.xz + ((id.xy + 0.5) / shadow_resolution - 0.5) * shadow_world_size;
     float3 shadow_start_pos = float3(worldXZ.x, _MinBounds.y, worldXZ.y);
     float3 rayDir = normalize(-_LightDirection);
-    
+
     float2 box_intersect = get_box_bounds(shadow_start_pos, rayDir);
-    
+
     float3 endPoint = shadow_start_pos + rayDir * box_intersect.y;
-    
+
     int steps = 0;
     float optical_depth = 0.0;
-    
+
     float step_size = distance(shadow_start_pos, endPoint) / shadow_steps;
-    
+
     while (steps < shadow_steps)
     {
         float3 p = shadow_start_pos + rayDir * step_size * (steps + 0.5);
         optical_depth += get_density(p, true) * step_size;
         steps++;
     }
-    
+
     //shadowRT[id.xy] = frac(worldXZ.x * 0.001);
     shadowRT[id.xy] = exp(-optical_depth);
     //shadowRT[id.xy] = (id.x + 0.5) / shadow_resolution;

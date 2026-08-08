@@ -16,6 +16,7 @@ float4 perlin_worley_worley_floats;
 float4 perlin_worley_1_floats;
 float4 perlin_worley_2_floats;
 float4 perlin_worley_3_floats;
+float4 weather_floats;
 
 float w_worley_1_base_frequency_global;
 float w_worley_2_base_frequency_global;
@@ -132,9 +133,7 @@ float Perlin(float3 pos, int freq)
     
     value = customLerp(p.z, y0, y1);
     
-    int v = value * 10000.0;
-    InterlockedMin(min_max_buffer[0], v);
-    InterlockedMax(min_max_buffer[1], v);
+    
     
     return value;
 }
@@ -233,15 +232,27 @@ void gen_weather (uint3 id : SV_DispatchThreadID)
     float3 uvw = float3((id.xy + 0.5) / 512, 0);
 
 
-    float mask = Perlin(uvw, 2);
+    /*float mask = Perlin(uvw, 2);
     mask = smoothstep(-0.4, 0.6, mask);
     
     float detail = Perlin(uvw, 4) * 0.625 + Perlin(uvw, 8) * 0.25 + Perlin(uvw, 16) * 0.125;
     detail = saturate(detail + 0.5);
    
-    float result = mask * detail;
+    float result = mask * detail;*/
     
-    weather_map[id.xy] = float4(result, 0.0, 0.0, 1.0);
+    float result = perlin_fbm(uvw ,Unpack(weather_floats));
+    int v = result * 10000.0;
+    InterlockedMin(min_max_buffer[0], v);
+    InterlockedMax(min_max_buffer[1], v);
+    result = remap(result, 0.31, 0.74, -0.5, 1.0);
+    
+    float cloud_type = 1;
+    if (distance(uvw.xy, float2(0.2, 0.2)) < 0.1)
+    {
+        cloud_type = 0.5 + saturate(distance(uvw.xy, float2(0.2, 0.2))  * 10 - 0.5);
+    }
+    
+    weather_map[id.xy] = float4(saturate(result), cloud_type, 0.0, 1.0);
 }
 
 
