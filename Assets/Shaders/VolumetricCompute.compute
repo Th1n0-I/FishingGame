@@ -190,7 +190,8 @@ float henyey_greenstein_old(float g, float costh)
 
 float henyey_greenstein(float g, float costh)
 {
-    return ((1.0 - g * g) / pow(1 + g * g - 2.0 * g * costh, 1.5f)) / (4 * PI);
+    // Never negative, the max just keeps g = +-1 from dividing by zero.
+    return ((1.0 - g * g) / pow(max(1 + g * g - 2.0 * g * costh, 1e-6), 1.5f)) / (4 * PI);
 }
 
 // Forward lobe gives the silver lining, back lobe keeps clouds lit when the sun is behind you.
@@ -270,15 +271,16 @@ float get_density(float3 worldPos, bool lowDetail = false)
     float result = base;
     result = remap(saturate(result), 1 - saturate(texture1_worley * detail_fbm_mult), 1.0, 0.0, 1.0);
     return saturate(result * full_density_mult);*/
-    cloud_type cloud;
+    // Defaults give zero density in case the weather map ever holds a cloud type none of the branches handle.
+    cloud_type cloud = unpack(cumulus_floats);
 
     float4 weather = weather_map.SampleLevel(sampler_weather_map, worldPos.xz / 128000 + weather_speed * time, 0);
     float sampled_cloud_type = weather.g * 2;
-    float height_frac;
+    float height_frac = 0;
     //float altitude = distance(worldPos, _SphereCenter) - _SphereMinRadius;
     float altitude = worldPos.y;
-    float shapeGradient;
-    float densityGradient;
+    float shapeGradient = 0;
+    float densityGradient = 0;
 
     if (sampled_cloud_type == 0)
     {
@@ -521,7 +523,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     if (any(pixel >= (uint2)cloud_size.xy)) return;
     float2 uv = (pixel + 0.5) / cloud_size.xy;
     // Moving the jitter every frame lets the Resolve kernel average the noise away (Jimenez 2014).
-    float2 jitter_id = pixel + (frame_index % 64) * 5.588238;
+    float2 jitter_id = pixel + (frame_index & 63) * 5.588238;
 
     float depth = DepthTex.SampleLevel(sampler_DepthTex, uv, 0).r;
     float3 worldPos = calculateWorldPos(uv, depth, _InvVP);

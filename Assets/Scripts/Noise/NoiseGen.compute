@@ -117,7 +117,8 @@ float Perlin(float3 pos, int freq)
     
     for (int i = 0; i < 8; i++)
     {
-        hVectors[i] = normalize(hash33((int3)vectors[i] % freq));
+        // The lattice coordinates are never negative, so the (faster) unsigned modulo gives the same result.
+        hVectors[i] = normalize(hash33((int3)((uint3)vectors[i] % (uint)freq)));
         float3 cVector = p - vectors[i];
         vectorDotValues[i] = dot(hVectors[i], cVector);
     }
