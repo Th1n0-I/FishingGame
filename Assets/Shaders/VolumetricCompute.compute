@@ -190,9 +190,10 @@ uint upscale_block()
 // This frame's sample position inside its upscale block. The first 4 entries of the 4x4 order, halved, are a 2x2 order.
 uint2 upscale_offset()
 {
-    if (upscale_factor >= 4) return pixel_shuffle[pixel_offset % 16];
-    if (upscale_factor == 2) return pixel_shuffle[pixel_offset % 4] / 2;
-    return uint2(0, 0);
+    uint2 offset = uint2(0, 0);
+    if (upscale_factor >= 4) offset = pixel_shuffle[pixel_offset % 16];
+    else if (upscale_factor == 2) offset = pixel_shuffle[pixel_offset % 4] / 2;
+    return offset;
 }
 
 float ign(float2 p)
