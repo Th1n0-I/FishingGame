@@ -214,7 +214,7 @@ public class NoiseController : MonoBehaviour {
 
 	// This frame's raymarch (a quarter of the size with temporal upscaling) and two resolved textures that swap every frame.
 	private readonly RenderTexture[] historyRTs = new RenderTexture[2];
-	private          RenderTexture   currentRT;
+	private          RenderTexture   currentRT, currentDepthRT;
 	private          int             historyIndex, frameIndex;
 	private          bool            historyValid, temporalEnabled = true;
 	private          float           toggleMessageUntil;
@@ -329,6 +329,8 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int HorizonFade                 = Shader.PropertyToID("horizon_fade");
 	private static readonly int WindShear                   = Shader.PropertyToID("wind_shear");
 	private static readonly int CurrentFrame                = Shader.PropertyToID("current_frame");
+	private static readonly int CurrentDepth                = Shader.PropertyToID("current_depth");
+	private static readonly int ResultDepth                 = Shader.PropertyToID("ResultDepth");
 	private static readonly int CloudSize                   = Shader.PropertyToID("cloud_size");
 	private static readonly int FrameIndex                  = Shader.PropertyToID("frame_index");
 	private static readonly int HistoryValid                = Shader.PropertyToID("history_valid");
@@ -500,19 +502,22 @@ public class NoiseController : MonoBehaviour {
 		int currentWidth  = temporalUpscaling ? (width  + 3) / 4 : width;
 		int currentHeight = temporalUpscaling ? (height + 3) / 4 : height;
 
-		if (currentRT && currentRT.width == currentWidth && currentRT.height == currentHeight &&
+		if (currentRT && currentRT.width == currentWidth && currentRT.height == currentHeight && currentDepthRT &&
 		    historyRTs[0] && historyRTs[0].width == width && historyRTs[0].height == height) return;
 
 		ReleaseCloudTextures();
-		currentRT     = CreateCloudTexture(currentWidth, currentHeight);
-		historyRTs[0] = CreateCloudTexture(width, height);
-		historyRTs[1] = CreateCloudTexture(width, height);
-		historyValid  = false;
+		currentRT      = CreateCloudTexture(currentWidth, currentHeight);
+		// Full float, the cloud distance goes past what half precision can hold (65 km).
+		currentDepthRT = CreateCloudTexture(currentWidth, currentHeight, RenderTextureFormat.RFloat);
+		historyRTs[0]  = CreateCloudTexture(width, height);
+		historyRTs[1]  = CreateCloudTexture(width, height);
+		historyValid   = false;
 	}
 
-	private static RenderTexture CreateCloudTexture(int width, int height) {
+	private static RenderTexture CreateCloudTexture(int width, int height,
+	                                                RenderTextureFormat format = RenderTextureFormat.ARGBHalf) {
 		// Half precision is plenty for cloud colours and halves the memory traffic of ARGBFloat.
-		var rt = new RenderTexture(width, height, 0, RenderTextureFormat.ARGBHalf) {
+		var rt = new RenderTexture(width, height, 0, format) {
 			enableRandomWrite = true,
 			// Clamp, with Repeat the bilinear upsampling pulled in clouds from the opposite screen edge.
 			wrapMode   = TextureWrapMode.Clamp,
@@ -524,10 +529,12 @@ public class NoiseController : MonoBehaviour {
 
 	private void ReleaseCloudTextures() {
 		DestroyTexture(currentRT);
+		DestroyTexture(currentDepthRT);
 		DestroyTexture(historyRTs[0]);
 		DestroyTexture(historyRTs[1]);
-		currentRT     = null;
-		historyRTs[0] = historyRTs[1] = null;
+		currentRT      = null;
+		currentDepthRT = null;
+		historyRTs[0]  = historyRTs[1] = null;
 	}
 
 	private static void DestroyTexture(RenderTexture rt) {
@@ -570,7 +577,9 @@ public class NoiseController : MonoBehaviour {
 
 			volumetricsShader.SetTexture(KernelMain,    DepthTex,         depthTex.rt);
 			volumetricsShader.SetTexture(KernelMain,    Result,           currentRT);
+			volumetricsShader.SetTexture(KernelMain,    ResultDepth,      currentDepthRT);
 			volumetricsShader.SetTexture(KernelResolve, CurrentFrame,     currentRT);
+			volumetricsShader.SetTexture(KernelResolve, CurrentDepth,     currentDepthRT);
 			volumetricsShader.SetTexture(KernelResolve, RendertextureOld, historyRead);
 			volumetricsShader.SetTexture(KernelResolve, Result,           historyWrite);
 			volumetricsShader.SetTexture(KernelShadows, ShadowRT,         shadowRT);

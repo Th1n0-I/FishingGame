@@ -6,6 +6,8 @@
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
 RWTexture2D<float4> Result;
+// Distance to the visible clouds for every raymarched pixel (0 = no clouds), used to reproject the history.
+RWTexture2D<float> ResultDepth;
 
 RWTexture2D<float4> shadowRT;
 
@@ -24,6 +26,7 @@ SamplerState sampler_weather_map;
 // Last frame's resolved clouds and this frame's raymarch, used by the Resolve kernel.
 Texture2D<float4> rendertexture_old;
 Texture2D<float4> current_frame;
+Texture2D<float> current_depth;
 SamplerState sampler_linear_clamp;
 
 Texture2D<float> cumulus_lut;
@@ -434,7 +437,7 @@ float3 calculateWorldPos(float2 uv, float depth, float4x4 inv_vp)
 }
 
 float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogCol, float stepSize, int maxSteps,
-                float viewLength, float transmittance, float2 id)
+                float viewLength, float transmittance, float2 id, inout float2 depth_acc)
 {
     float sun_elevation = -_LightDirection.y;
     float t = smoothstep(0.0, 0.25, sun_elevation);
@@ -502,8 +505,11 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
         float powder = lerp(1.0, 1.0 - exp(-2.0 * shadow_od), powder_strength * saturate(0.5 - 0.5 * cos_theta));
         float3 ambient = ambient_color * lerp(ambient_bottom, 1.0, height_frac);
         // Fade far samples out so the horizon turns into haze instead of noise.
-        float fade = exp(-distance(worldPos, camPoint) / max(horizon_fade, 1.0));
+        float cam_distance = distance(worldPos, camPoint);
+        float fade = exp(-cam_distance / max(horizon_fade, 1.0));
         float step_opacity = (1.0 - exp(-density * stepSize)) * fade;
+        // Average distance weighted by how much each step shows up in the final pixel.
+        depth_acc += float2(cam_distance, 1.0) * (transmittance * step_opacity);
         // Energy conserving integration (Hillaire 2015), looks the same no matter the step size.
         fogColor.rgb += transmittance * step_opacity * (light_contribution * sun_light * powder + ambient);
         transmittance *= 1.0 - step_opacity;
@@ -517,6 +523,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // The dispatch is rounded up, so threads past the edge have nothing to do.
     if (any(id.xy >= (uint2)cloud_size.zw)) return;
     Result[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+    ResultDepth[id.xy] = 0.0;
 
     // With temporal upscaling each thread renders one pixel of a 4x4 block, a different one every frame.
     uint2 pixel = use_temporal_upscaling ? id.xy * 4 + pixel_shuffle[pixel_offset] : id.xy;
@@ -585,15 +592,18 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         float3 a0 = entryPos + rayDir * seg0.x;
         float3 b0 = entryPos + rayDir * seg0.y;
         // Starts at 0, the result is premultiplied (ambient is added inside the march now).
+        float2 depth_acc = float2(0.0, 0.0);
         float4 res = raymarch(a0, b0, entryPos, float3(0, 0, 0),
-                              distance(a0, b0) / steps, steps, viewLength, 1.0, jitter_id);
+                              distance(a0, b0) / steps, steps, viewLength, 1.0, jitter_id, depth_acc);
         if (split)
         {
             float3 a1 = entryPos + rayDir * seg1.x;
             float3 b1 = entryPos + rayDir * seg1.y;
-            res = raymarch(a1, b1, entryPos, res.rgb, distance(a1, b1) / steps, steps, viewLength, res.a, jitter_id);
+            res = raymarch(a1, b1, entryPos, res.rgb, distance(a1, b1) / steps, steps, viewLength, res.a, jitter_id,
+                           depth_acc);
         }
         Result[id.xy] = float4(res.rgb, 1.0 - saturate((res.a <= 0.01 ? 0 : res.a)));
+        ResultDepth[id.xy] = depth_acc.y > 0.001 ? depth_acc.x / depth_acc.y : 0.0;
     }
 }
 
@@ -628,42 +638,67 @@ float4 sample_catmull_rom(Texture2D<float4> tex, float2 uv, float2 size)
     return result;
 }
 
-// Blends this frame's raymarch into last frame's result. Smooths out the jitter noise and fills in the
-// 15 of 16 pixels that temporal upscaling didn't render this frame.
+// Blends this frame's raymarch into last frame's result. Smooths out the jitter noise and, with temporal
+// upscaling, builds the full resolution image from the sparse samples over several frames.
 [numthreads(8,8,1)]
 void Resolve(uint3 id : SV_DispatchThreadID)
 {
     if (any(id.xy >= (uint2)cloud_size.xy)) return;
 
     int2 current_max = (int2)cloud_size.zw - 1;
-    int2 current_id = min(use_temporal_upscaling ? (int2)(id.xy / 4) : (int2)id.xy, current_max);
-    bool rendered_now = !use_temporal_upscaling || all(id.xy % 4 == pixel_shuffle[pixel_offset]);
+    int2 center_id = min(use_temporal_upscaling ? (int2)(id.xy / 4) : (int2)id.xy, current_max);
+    // Where this frame's samples sit: every pixel, or one per 4x4 block at this frame's offset.
+    float sample_spacing = use_temporal_upscaling ? 4.0 : 1.0;
+    float2 sample_offset = use_temporal_upscaling ? (float2)pixel_shuffle[pixel_offset] : float2(0.0, 0.0);
 
-    // The history gets clamped to what this frame looks like around the pixel, which stops ghosting.
-    float4 current = current_frame[current_id];
-    float4 neighbour_min = current;
-    float4 neighbour_max = current;
+    // Look at this frame's samples around the pixel: their range clamps the history (stops ghosting),
+    // their distance weighted average is the new value when upscaling, and their depth drives the reprojection.
+    float4 center = current_frame[center_id];
+    float4 neighbour_min = center;
+    float4 neighbour_max = center;
+    float4 estimate = float4(0.0, 0.0, 0.0, 0.0);
+    float estimate_weight = 0.0;
+    float depth_sum = 0.0;
+    float depth_weight = 0.0;
     for (int y = -1; y <= 1; y++)
     {
         for (int x = -1; x <= 1; x++)
         {
-            float4 neighbour = current_frame[clamp(current_id + int2(x, y), 0, current_max)];
+            int2 sample_id = clamp(center_id + int2(x, y), 0, current_max);
+            float4 neighbour = current_frame[sample_id];
+            float neighbour_depth = current_depth[sample_id];
             neighbour_min = min(neighbour_min, neighbour);
             neighbour_max = max(neighbour_max, neighbour);
+
+            // Gaussian with a 0.8 pixel radius, picked by simulating the upsampler on a real screenshot.
+            float2 to_sample = (float2)sample_id * sample_spacing + sample_offset - (float2)id.xy;
+            float weight = exp(-dot(to_sample, to_sample) * 0.78125);
+            estimate += neighbour * weight;
+            estimate_weight += weight;
+            if (neighbour_depth > 0.0)
+            {
+                depth_sum += neighbour_depth * weight;
+                depth_weight += weight;
+            }
         }
     }
 
-    // Where were these clouds last frame? The camera moved and the wind pushed the clouds along.
-    // Inside the cloud layer the entry is 0, any distance works there as long as the camera only rotates.
+    // Without upscaling every pixel has its own fresh sample. With upscaling a pixel only gets a close
+    // sample every few frames, so it takes a bigger share of whatever is near it this frame.
+    float4 current = use_temporal_upscaling ? estimate / estimate_weight : center;
+    float blend = use_temporal_upscaling ? saturate(saturate(temporal_blend * 5.0) * estimate_weight) : temporal_blend;
+
+    // Where were these clouds last frame? Uses the raymarched cloud distance, so flying around reprojects
+    // correctly. Pixels without clouds nearby fall back to the cloud layer entry (any distance works for rotation).
     float2 uv = (id.xy + 0.5) / cloud_size.xy;
     float3 ray_dir = normalize(calculateWorldPos(uv, 0.5, _InvVP) - _CamPos.xyz);
-    float cloud_distance = max(get_bounds_intersect(_CamPos.xyz, ray_dir), 1000.0);
+    float cloud_distance = depth_weight > 0.0 ? depth_sum / depth_weight
+                                              : max(get_bounds_intersect(_CamPos.xyz, ray_dir), 1000.0);
     float3 cloud_pos = _CamPos.xyz + ray_dir * cloud_distance + wind_offset.xyz;
     float4 prev_clip = mul(prev_vp, float4(cloud_pos, 1.0));
     float2 prev_uv = prev_clip.xy / prev_clip.w * 0.5 + 0.5;
     bool on_screen = prev_clip.w > 0 && all(prev_uv >= 0) && all(prev_uv <= 1);
 
-    float blend = rendered_now ? (use_temporal_upscaling ? 1.0 : temporal_blend) : 0.0;
     if (!history_valid || !on_screen) blend = 1.0;
 
     // Selected instead of lerped so garbage in a freshly created history texture can't leak through.
