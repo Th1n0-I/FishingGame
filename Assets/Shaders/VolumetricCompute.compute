@@ -723,7 +723,7 @@ float4 march_cloud_layer(float3 entryPos, float3 rayDir, float viewLength, float
         }
     }
 
-    int steps = split ? max(_StepAmount / 2, 1) : _StepAmount;
+    int steps = split ? max(_StepAmount >> 1, 1) : _StepAmount;
     float3 a0 = entryPos + rayDir * seg0.x;
     float3 b0 = entryPos + rayDir * seg0.y;
     res = raymarch(a0, b0, entryPos, res.rgb, distance(a0, b0) / steps, steps, viewLength, res.a, jitter_id, depth_acc);

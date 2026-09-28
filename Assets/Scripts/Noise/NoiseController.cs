@@ -513,6 +513,8 @@ public class NoiseController : MonoBehaviour {
 
 	// Sets the preset's values, Custom goes back to the inspector values.
 	private void ApplyQuality(CloudQuality preset) {
+		// Remember what Custom was set to (including changes made while on it) when leaving it.
+		if (appliedQuality == CloudQuality.Custom && preset != CloudQuality.Custom) customQuality = CurrentQualityValues();
 		var values = preset switch {
 			CloudQuality.Low    => new QualityValues { stepAmount = 64,  textureDivide = 2, upscaling = UpscaleMode.FourByFour, detailDistance = 15000f },
 			CloudQuality.Medium => new QualityValues { stepAmount = 96,  textureDivide = 2, upscaling = UpscaleMode.TwoByTwo,   detailDistance = 25000f },
