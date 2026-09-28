@@ -156,6 +156,8 @@ public class NoiseController : MonoBehaviour {
 	private float powderStrength = 0.5f;
 	[SerializeField, Tooltip("Distance in meters where the clouds have faded to ~37%.")]
 	private float horizonFade = 60000f;
+	[SerializeField, Tooltip("How far in meters the cloud tops lean with the wind. Flip the sign if Base Speed is negative.")]
+	private float windShear = 1000f;
 
 	[Header("Cloud Types")]
 	[SerializeField] private CloudType stratus;
@@ -312,6 +314,7 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int AmbientBottom               = Shader.PropertyToID("ambient_bottom");
 	private static readonly int PowderStrength              = Shader.PropertyToID("powder_strength");
 	private static readonly int HorizonFade                 = Shader.PropertyToID("horizon_fade");
+	private static readonly int WindShear                   = Shader.PropertyToID("wind_shear");
 
 	#endregion
 
@@ -397,9 +400,9 @@ public class NoiseController : MonoBehaviour {
 	}
 
 	private void InitializeWorley() {
-		worleyRenderTexture = new RenderTexture(32, 32, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+		worleyRenderTexture = new RenderTexture(128, 128, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
 		worleyRenderTexture.dimension = TextureDimension.Tex3D;
-		worleyRenderTexture.volumeDepth = 32;
+		worleyRenderTexture.volumeDepth = 128;
 		worleyRenderTexture.enableRandomWrite = true;
 		worleyRenderTexture.wrapMode = TextureWrapMode.Repeat;
 		worleyRenderTexture.Create();
@@ -539,6 +542,7 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(AmbientBottom,     ambientBottom);
 			volumetricsShader.SetFloat(PowderStrength,    powderStrength);
 			volumetricsShader.SetFloat(HorizonFade,       horizonFade);
+			volumetricsShader.SetFloat(WindShear,         windShear);
 			volumetricsShader.SetFloat(Coverage,          coverage);
 			volumetricsShader.SetInt(CurrentCloudType, currentType);
 			volumetricsShader.SetFloat(ShadowResolution1, shadowRT.width);

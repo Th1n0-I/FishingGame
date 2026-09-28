@@ -153,6 +153,7 @@ float perlin_fbm(float3 pos, noise_parameters n)
     
     for (int x = 0; x < n.octaves; x++)
     {
+        if (frequency > 128) break; // Above half the 256 texture resolution an octave only adds aliasing.
         result += remap(Perlin(pos, (int)round(frequency)), -0.75, 0.75, 0, 1) * amp;
         sum += amp;
         
@@ -175,6 +176,7 @@ float worley_fbm(float3 pos, noise_parameters n, float cell_radius)
     
     for (int x = 0; x < n.octaves; x++)
     {
+        if (frequency / cell_radius > 128) break; // Same aliasing limit as perlin_fbm.
         result *= (1 - Worley(pos, ((int)round(frequency)) / cell_radius)  * amp);
         sum += amp;
         
@@ -220,7 +222,7 @@ void GenPerlin (uint3 id : SV_DispatchThreadID)
 [numthreads(8,8,8)]
 void GenWorley (uint3 id : SV_DispatchThreadID)
 {
-    float3 uvw = (id.xyz + 0.5) / 32;
+    float3 uvw = (id.xyz + 0.5) / 128; // Has to match the Worley texture size in NoiseController.
     float3 worley = float3(Worley(uvw, w_worley_1_base_frequency_global), Worley(uvw, w_worley_2_base_frequency_global), Worley(uvw, w_worley_3_base_frequency_global));
     
     WorleyTex[id.xyz] = saturate(float4(1.0 - worley.xyz, 1.0));

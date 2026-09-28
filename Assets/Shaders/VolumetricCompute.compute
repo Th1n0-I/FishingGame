@@ -75,6 +75,7 @@ float back_scattering_weight;
 float ambient_bottom;
 float powder_strength;
 float horizon_fade;
+float wind_shear;
 
 // Height fraction of the last get_density() call, used for the ambient gradient.
 static float last_height_frac;
@@ -321,6 +322,7 @@ float get_density(float3 worldPos, bool lowDetail = false)
     last_height_frac = height_frac;
 
     if ((1 - coverage) + weather.r >= 1.0) return 0;
+    worldPos.x += saturate(height_frac) * wind_shear; // Tops lean downwind (the noise scrolls towards -x).
 
     float3 perlin_world_pos = float3(worldPos.x / _NoiseSize + time * base_speed,
                                      worldPos.y * _SquishFactor / _NoiseSize, worldPos.z / _NoiseSize);
