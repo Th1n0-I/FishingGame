@@ -71,9 +71,11 @@ float detail_mult;
 float detail_weight1;
 float detail_weight2;
 float detail_weight3;
-float base_speed;
-float detail_speed;
-float weather_speed;
+// How far the wind has carried the clouds (xyz, meters) and how far the detail noise has risen (w, meters).
+// All layers move together, so the temporal reprojection can follow them exactly.
+float4 wind_travel;
+// Direction the wind blows the clouds towards, on the xz plane.
+float4 wind_direction;
 float shadow_step_size;
 float shadow_cone_spread;
 float coverage;
@@ -291,7 +293,7 @@ float get_density(float3 worldPos, bool lowDetail = false)
     // Defaults give zero density in case the weather map ever holds a cloud type none of the branches handle.
     cloud_type cloud = unpack(cumulus_floats);
 
-    float4 weather = weather_map.SampleLevel(sampler_weather_map, worldPos.xz / 128000 + weather_speed * time, 0);
+    float4 weather = weather_map.SampleLevel(sampler_weather_map, (worldPos.xz - wind_travel.xz) / 128000, 0);
     float sampled_cloud_type = weather.g * 2;
     float height_frac = 0;
     //float altitude = distance(worldPos, _SphereCenter) - _SphereMinRadius;
@@ -349,10 +351,10 @@ float get_density(float3 worldPos, bool lowDetail = false)
     last_height_frac = height_frac;
 
     if ((1 - coverage) + weather.r >= 1.0) return 0;
-    worldPos.x += saturate(height_frac) * wind_shear; // Tops lean downwind (the noise scrolls towards -x).
+    worldPos.xz -= wind_direction.xy * (saturate(height_frac) * wind_shear); // Tops lean downwind.
 
-    float3 perlin_world_pos = float3(worldPos.x / _NoiseSize + time * base_speed,
-                                     worldPos.y * _SquishFactor / _NoiseSize, worldPos.z / _NoiseSize);
+    float3 perlin_world_pos = float3((worldPos.x - wind_travel.x) / _NoiseSize,
+                                     worldPos.y * _SquishFactor / _NoiseSize, (worldPos.z - wind_travel.z) / _NoiseSize);
     float4 perlin = _PerlinTex.SampleLevel(sampler_PerlinTex, perlin_world_pos, 0);
     float detail = perlin.r * 0.625 + perlin.g * 0.25 + perlin.b * 0.125;
 
@@ -366,7 +368,7 @@ float get_density(float3 worldPos, bool lowDetail = false)
     // Cheap version for the long shadow sample and the ground shadows: erode by the average detail instead.
     if (lowDetail) return max(remap(base, 0.5 * detail_mult, 1.0, 0.0, 1.0) * full_density_mult * cloud.density * densityGradient, 0.0);
     float3 low_quality_detail_rgb = _WorleyTex.SampleLevel(sampler_WorleyTex,
-                                                           worldPos / _DetailSize + time * detail_speed, 0).rgb;
+                                                           (worldPos - wind_travel.xyz - float3(0.0, wind_travel.w, 0.0)) / _DetailSize, 0).rgb;
     float low_quality_detail = low_quality_detail_rgb.r * 0.625 + low_quality_detail_rgb.g * 0.25 +
         low_quality_detail_rgb.b * 0.125;
     low_quality_detail = lerp(low_quality_detail, 1 - low_quality_detail, saturate(height_frac * 10));

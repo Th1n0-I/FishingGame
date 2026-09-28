@@ -149,9 +149,6 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField] private float sphereMaxRadius = 1.0f;
 	[SerializeField] private float cumulusYMin     = 1500f;
 	[SerializeField] private float cumulusYMax     = 2500f;
-	[SerializeField] private float baseSpeed;
-	[SerializeField] private float detailSpeed;
-	[SerializeField] private float weatherSpeed;
 	[SerializeField] private bool  combineBounds = true;
 	[SerializeField] private Color fogColor;
 	[SerializeField] private Color fogColorNight;
@@ -174,8 +171,22 @@ public class NoiseController : MonoBehaviour {
 	private float powderStrength = 0.5f;
 	[SerializeField, Tooltip("Distance in meters where the clouds have faded to ~37%.")]
 	private float horizonFade = 60000f;
-	[SerializeField, Tooltip("How far in meters the cloud tops lean with the wind. Flip the sign if Base Speed is negative.")]
+
+	[Header("-Wind")]
+	[SerializeField, Tooltip("How fast the clouds drift in m/s. Real clouds move about 5 to 30 m/s.")]
+	private float windSpeed = 40f;
+	[SerializeField, Tooltip("Direction the clouds drift towards (x, z).")]
+	private Vector2 windDirection = new Vector2(-1, 0);
+	[SerializeField, Tooltip("How fast the detail noise rises through the clouds in m/s, so the edges churn a bit. The temporal reprojection can't follow this part, so keep it small.")]
+	private float detailRiseSpeed = 5f;
+	[SerializeField, Tooltip("How far in meters the cloud tops lean downwind.")]
 	private float windShear = 1000f;
+
+	[Header("-Day Night Cycle")]
+	[SerializeField, Tooltip("Drives the sun, moon and cloud lighting. When empty the one in the scene is used, or one gets created.")]
+	private DayNightCycle dayNightCycle;
+	[SerializeField, Tooltip("Create a Day Night Cycle with the default settings when the scene doesn't have one.")]
+	private bool createDayNightCycle = true;
 
 	[Header("Cloud Types")]
 	[SerializeField] private CloudType stratus;
@@ -228,6 +239,10 @@ public class NoiseController : MonoBehaviour {
 	private          int             historyIndex, frameIndex;
 	private          bool            historyValid, temporalEnabled = true;
 	private          float           toggleMessageUntil;
+
+	// How far the wind has carried the clouds and how far the detail has risen, in meters.
+	private Vector3 windTravel;
+	private float   detailRise;
 
 	// Kernel order in VolumetricCompute.compute.
 	private const int KernelMain = 0, KernelResolve = 1, KernelShadows = 2;
@@ -287,8 +302,8 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int DetailWeight3               = Shader.PropertyToID("detail_weight3");
 	private static readonly int FullDensityMult             = Shader.PropertyToID("full_density_mult");
 	private static readonly int Time                        = Shader.PropertyToID("time");
-	private static readonly int BaseSpeed                   = Shader.PropertyToID("base_speed");
-	private static readonly int DetailSpeed                 = Shader.PropertyToID("detail_speed");
+	private static readonly int WindTravel                  = Shader.PropertyToID("wind_travel");
+	private static readonly int WindDirectionID             = Shader.PropertyToID("wind_direction");
 	private static readonly int ShadowStepSize              = Shader.PropertyToID("shadow_step_size");
 	private static readonly int ShadowConeSpread            = Shader.PropertyToID("shadow_cone_spread");
 	private static readonly int LightContributionSunset     = Shader.PropertyToID("light_contribution_sunset");
@@ -331,7 +346,6 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int PWorley3LacunarityGlobal    = Shader.PropertyToID("p_worley_3_lacunarity_global");
 	private static readonly int PWorley3GainGlobal          = Shader.PropertyToID("p_worley_3_gain_global");
 	private static readonly int PWorley3OctavesGlobal       = Shader.PropertyToID("p_worley_3_octaves_global");
-	private static readonly int WeatherSpeed                = Shader.PropertyToID("weather_speed");
 	private static readonly int BackScattering              = Shader.PropertyToID("back_scattering");
 	private static readonly int BackScatteringWeight        = Shader.PropertyToID("back_scattering_weight");
 	private static readonly int AmbientBottom               = Shader.PropertyToID("ambient_bottom");
@@ -372,6 +386,9 @@ public class NoiseController : MonoBehaviour {
 		InitializeNoise();
 
 		InitializeVolumetrics();
+
+		if (!dayNightCycle) dayNightCycle = FindAnyObjectByType<DayNightCycle>();
+		if (!dayNightCycle && createDayNightCycle) dayNightCycle = new GameObject("Day Night Cycle").AddComponent<DayNightCycle>();
 	}
 
 	private void OnValidate() {
@@ -602,8 +619,16 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetInt(FrameIndex, blend < 1.0f || UpscaleFactor > 1 ? frameIndex : 0);
 			volumetricsShader.SetFloat(TemporalBlend, blend);
 			volumetricsShader.SetBool(HistoryValid, historyValid);
-			// The base noise scrolls by baseSpeed noise tiles per second towards -x, so last frame the clouds were further along +x.
-			volumetricsShader.SetVector(WindOffset, new Vector4(baseSpeed * noiseSize * UnityEngine.Time.deltaTime, 0, 0, 0));
+
+			// One wind moves every noise layer, so the history can be moved back by exactly the same step.
+			float   deltaTime     = UnityEngine.Time.deltaTime;
+			Vector2 windDir       = windDirection.sqrMagnitude > 1e-6f ? windDirection.normalized : Vector2.left;
+			var     windVelocity  = new Vector3(windDir.x, 0, windDir.y) * windSpeed;
+			windTravel += windVelocity * deltaTime;
+			detailRise += detailRiseSpeed * deltaTime;
+			volumetricsShader.SetVector(WindTravel,      new Vector4(windTravel.x, windTravel.y, windTravel.z, detailRise));
+			volumetricsShader.SetVector(WindDirectionID, new Vector4(windDir.x, windDir.y, 0, 0));
+			volumetricsShader.SetVector(WindOffset,      -windVelocity * deltaTime);
 			volumetricsShader.SetFloat(SkyDepth, SystemInfo.usesReversedZBuffer ? 0.0f : 1.0f);
 
 			// Snapped to whole texels so the ground shadows don't shimmer while the camera moves.
@@ -618,14 +643,17 @@ public class NoiseController : MonoBehaviour {
 			                            new Vector4(cam.transform.position.x, cam.transform.position.y,
 			                                        cam.transform.position.z, 0.0f));
 
-			volumetricsShader.SetVector(FogColor,          fogColor);
-			volumetricsShader.SetVector(FogBaseColorNight, fogColorNight);
+			// With a day night cycle the clouds get its light (sun by day, moon by night) and its sky colour,
+			// the colour already has the sunset tint in it. Without one the settings above are used.
+			bool cycle = dayNightCycle && dayNightCycle.CloudLight;
+			volumetricsShader.SetVector(FogColor,          cycle ? dayNightCycle.CloudAmbient : fogColor);
+			volumetricsShader.SetVector(FogBaseColorNight, cycle ? dayNightCycle.CloudAmbient : fogColorNight);
 
 			volumetricsShader.SetVector(LightContribution,       lightContribution);
-			volumetricsShader.SetVector(LightContributionSunset, lightContributionSunset);
+			volumetricsShader.SetVector(LightContributionSunset, cycle ? lightContribution : lightContributionSunset);
 
-			volumetricsShader.SetVector(MainLightColor, sun.color.linear);
-			volumetricsShader.SetVector(LightDirection, sun.transform.forward);
+			volumetricsShader.SetVector(MainLightColor, cycle ? dayNightCycle.CloudLightColor : sun.color.linear);
+			volumetricsShader.SetVector(LightDirection, cycle ? dayNightCycle.CloudLight.forward : sun.transform.forward);
 
 			volumetricsShader.SetVector(MinBounds, bounds.bounds.min);
 			volumetricsShader.SetVector(MaxBounds, bounds.bounds.max);
@@ -656,9 +684,6 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(DetailWeight3,     smallDetail3Weight);
 			volumetricsShader.SetFloat(FullDensityMult,   fullDensityMult);
 			volumetricsShader.SetFloat(Time,              UnityEngine.Time.time);
-			volumetricsShader.SetFloat(BaseSpeed,         baseSpeed);
-			volumetricsShader.SetFloat(DetailSpeed,       detailSpeed);
-			volumetricsShader.SetFloat(WeatherSpeed, weatherSpeed);
 			volumetricsShader.SetFloat(ShadowStepSize,    shadowStepSize);
 			volumetricsShader.SetFloat(ShadowConeSpread,  shadowConeSpread);
 			volumetricsShader.SetFloat(BackScattering,    backScattering);
