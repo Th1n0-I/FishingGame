@@ -25,6 +25,10 @@ class CloudType {
 	private Texture2D shapeLut, densityLut;
 	private bool      curvesDirty;
 
+	// Every kernel that samples the cloud density.
+	private static readonly int[] DensityKernels =
+		{ NoiseController.KernelMain, NoiseController.KernelShadows, NoiseController.KernelLightVolume };
+
 	public void Init() {
 		floatsID       = Shader.PropertyToID(prefix + "_floats");
 		shapeCurveID   = Shader.PropertyToID(prefix + "_shape_lut");
@@ -50,10 +54,10 @@ class CloudType {
 		}
 
 		cs.SetVector(floatsID, new Vector4(startAltitude, height, density, coverage));
-		cs.SetTexture(0, shapeCurveID,   shapeLut);
-		cs.SetTexture(0, densityCurveID, densityLut);
-		cs.SetTexture(2, shapeCurveID,   shapeLut);
-		cs.SetTexture(2, densityCurveID, densityLut);
+		foreach (int kernel in DensityKernels) {
+			cs.SetTexture(kernel, shapeCurveID,   shapeLut);
+			cs.SetTexture(kernel, densityCurveID, densityLut);
+		}
 	}
 
 	private void GenCurveLut(Texture2D tex, AnimationCurve curve) {
@@ -98,6 +102,15 @@ public class NoiseController : MonoBehaviour {
 	// Starts at 0 so scenes that saved the old bool (false) load as Off.
 	private enum UpscaleMode { Off, TwoByTwo, FourByFour }
 
+	private enum CloudQuality { Custom, Low, Medium, High, Ultra }
+
+	// What a quality preset sets.
+	private struct QualityValues {
+		public int         stepAmount, textureDivide;
+		public UpscaleMode upscaling;
+		public float       detailDistance;
+	}
+
 	private int UpscaleFactor => temporalUpscaling switch {
 		UpscaleMode.TwoByTwo   => 2,
 		UpscaleMode.FourByFour => 4,
@@ -106,6 +119,14 @@ public class NoiseController : MonoBehaviour {
 
 	[Header("Volumetrics")]
 	[Header("-Quality")]
+	[SerializeField, Tooltip("Anything but Custom sets Step Amount, Texture Divide, Temporal Upscaling and Detail Distance when the game starts. F1 to F4 pick Low to Ultra in game, F5 goes back to Custom.")]
+	private CloudQuality quality = CloudQuality.High;
+	[SerializeField, Tooltip("Takes bigger steps through empty space and only goes back to normal steps near clouds.")]
+	private bool emptySpaceSkipping = true;
+	[SerializeField, Tooltip("Bakes the far part of the light samples into a 3D texture around the camera every frame instead of sampling them for every step.")]
+	private bool useLightVolume = true;
+	[SerializeField, Tooltip("Distance in meters where the cloud detail has faded to its average, from 60% of it on. 0 keeps full detail everywhere.")]
+	private float detailDistance = 35000f;
 	[SerializeField]
 	private int textureDivide = 2;
 	[SerializeField] private float stepSize            = 1.0f;
@@ -120,7 +141,8 @@ public class NoiseController : MonoBehaviour {
 	private float temporalBlend = 0.1f;
 
 	[Header("-Settings")]
-	[SerializeField] private float coverage;
+	[SerializeField, Range(0, 1), Tooltip("How much of the sky the clouds fill. Seen from straight above 0.67 covers about 28%, 0.78 about 45%.")]
+	private float cloudCoverage = 0.78f;
 	[SerializeField] private int   currentType = 3;
 	[SerializeField] private float fullDensityMult;
 	[SerializeField] private float densityMultiplier = 1.0f;
@@ -181,6 +203,17 @@ public class NoiseController : MonoBehaviour {
 	private float detailRiseSpeed = 5f;
 	[SerializeField, Tooltip("How far in meters the cloud tops lean downwind.")]
 	private float windShear = 1000f;
+
+	[Header("-Cirrus")]
+	[SerializeField, Tooltip("Thin streaky ice clouds high above the others.")]
+	private bool cirrus = true;
+	[SerializeField] private float cirrusHeight = 10000f;
+	[SerializeField, Range(0, 1)] private float cirrusCoverage = 0.65f;
+	[SerializeField, Range(0, 1)] private float cirrusOpacity  = 0.55f;
+	[SerializeField, Tooltip("Size of the streaks along the wind and across it, in meters.")]
+	private Vector2 cirrusStreakSize = new Vector2(60000f, 6000f);
+	[SerializeField, Tooltip("Size of the patches the cirrus comes in, in meters.")]
+	private float cirrusPatchSize = 100000f;
 
 	[Header("-Day Night Cycle")]
 	[SerializeField, Tooltip("Drives the sun, moon and cloud lighting. When empty the one in the scene is used, or one gets created.")]
@@ -244,8 +277,18 @@ public class NoiseController : MonoBehaviour {
 	private Vector3 windTravel;
 	private float   detailRise;
 
+	// The far part of the light cone around the camera, 375 m voxels over the cloud layer.
+	private RenderTexture lightVolumeRT;
+	private const int     LightVolumeWidth = 128, LightVolumeHeight = 32;
+	private const float   LightVolumeSize  = 48000f;
+
+	// The inspector values, for going back to Custom, and which preset is applied.
+	private QualityValues customQuality;
+	private CloudQuality  appliedQuality;
+	private bool          detailFade = true;
+
 	// Kernel order in VolumetricCompute.compute.
-	private const int KernelMain = 0, KernelResolve = 1, KernelShadows = 2;
+	internal const int KernelMain = 0, KernelResolve = 1, KernelShadows = 2, KernelLightVolume = 3;
 
 
 	#region Caches
@@ -362,7 +405,19 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int WindOffset                  = Shader.PropertyToID("wind_offset");
 	private static readonly int ShadowCenter                = Shader.PropertyToID("shadow_center");
 	private static readonly int CloudShadowCenter           = Shader.PropertyToID("_CloudShadowCenter");
+	private static readonly int CloudShadowLight            = Shader.PropertyToID("_CloudShadowLight");
 	private static readonly int SkyDepth                    = Shader.PropertyToID("sky_depth");
+	private static readonly int EmptySpaceSkipping          = Shader.PropertyToID("empty_space_skipping");
+	private static readonly int LodFade                     = Shader.PropertyToID("lod_fade");
+	private static readonly int UseLightVolumeID            = Shader.PropertyToID("use_light_volume");
+	private static readonly int LightVolume                 = Shader.PropertyToID("light_volume");
+	private static readonly int LightVolumeOut              = Shader.PropertyToID("light_volume_out");
+	private static readonly int LightVolumeOrigin           = Shader.PropertyToID("light_volume_origin");
+	private static readonly int LightVolumeSizeID           = Shader.PropertyToID("light_volume_size");
+	private static readonly int LightVolumeRes              = Shader.PropertyToID("light_volume_res");
+	private static readonly int CirrusParams                = Shader.PropertyToID("cirrus_params");
+	private static readonly int CirrusScale                 = Shader.PropertyToID("cirrus_scale");
+	private static readonly int PixelAngle                  = Shader.PropertyToID("pixel_angle");
 
 	#endregion
 
@@ -389,6 +444,11 @@ public class NoiseController : MonoBehaviour {
 
 		if (!dayNightCycle) dayNightCycle = FindAnyObjectByType<DayNightCycle>();
 		if (!dayNightCycle && createDayNightCycle) dayNightCycle = new GameObject("Day Night Cycle").AddComponent<DayNightCycle>();
+
+		customQuality = CurrentQualityValues();
+		ApplyQuality(quality);
+		// Show the controls for a bit at the start.
+		toggleMessageUntil = UnityEngine.Time.unscaledTime + 6;
 	}
 
 	private void OnValidate() {
@@ -398,6 +458,8 @@ public class NoiseController : MonoBehaviour {
 
 	private void Update() {
 		CheckToggleKeys();
+		// Also picks up the preset being changed in the inspector while playing.
+		if (quality != appliedQuality) ApplyQuality(quality);
 
 		if (!regenerateNoise && !constantlyGenerateNoise) return;
 		DispatchWeather();
@@ -407,31 +469,62 @@ public class NoiseController : MonoBehaviour {
 
 	private void OnDestroy() {
 		ReleaseCloudTextures();
-		foreach (var rt in new[] { perlinRenderTexture, worleyRenderTexture, weatherRenderTexture, shadowRT }) DestroyTexture(rt);
+		foreach (var rt in new[] { perlinRenderTexture, worleyRenderTexture, weatherRenderTexture, shadowRT, lightVolumeRT }) DestroyTexture(rt);
 		if (cloudTypes != null) foreach (var v in cloudTypes) v?.Release();
 		if (CumulusLut) Destroy(CumulusLut);
 		minMaxValues?.Release();
 	}
 
-	// T and U toggle the temporal features in a build, so they can be compared without the editor.
+	// Keys to switch the presets and every feature in a build, so they can be compared without the editor.
 	private void CheckToggleKeys() {
 		var keyboard = Keyboard.current;
 		if (keyboard == null) return;
 
-		if (keyboard.tKey.wasPressedThisFrame) {
-			temporalEnabled = !temporalEnabled;
-			toggleMessageUntil = UnityEngine.Time.unscaledTime + 3;
-		}
-		if (keyboard.uKey.wasPressedThisFrame) {
-			temporalUpscaling = (UpscaleMode)(((int)temporalUpscaling + 1) % 3);
-			toggleMessageUntil = UnityEngine.Time.unscaledTime + 3;
-		}
+		bool pressed = true;
+		if (keyboard.f1Key.wasPressedThisFrame) quality = CloudQuality.Low;
+		else if (keyboard.f2Key.wasPressedThisFrame) quality = CloudQuality.Medium;
+		else if (keyboard.f3Key.wasPressedThisFrame) quality = CloudQuality.High;
+		else if (keyboard.f4Key.wasPressedThisFrame) quality = CloudQuality.Ultra;
+		else if (keyboard.f5Key.wasPressedThisFrame) quality = CloudQuality.Custom;
+		else if (keyboard.tKey.wasPressedThisFrame) temporalEnabled = !temporalEnabled;
+		else if (keyboard.uKey.wasPressedThisFrame) temporalUpscaling = (UpscaleMode)(((int)temporalUpscaling + 1) % 3);
+		else if (keyboard.kKey.wasPressedThisFrame) emptySpaceSkipping = !emptySpaceSkipping;
+		else if (keyboard.lKey.wasPressedThisFrame) useLightVolume = !useLightVolume;
+		else if (keyboard.oKey.wasPressedThisFrame) detailFade = !detailFade;
+		else if (keyboard.hKey.wasPressedThisFrame) cirrus = !cirrus;
+		else pressed = false;
+		if (pressed) toggleMessageUntil = UnityEngine.Time.unscaledTime + 3;
 	}
 
 	private void OnGUI() {
 		if (UnityEngine.Time.unscaledTime > toggleMessageUntil) return;
-		GUI.Label(new Rect(10, Screen.height - 30, 800, 25),
-		          $"[T] Temporal accumulation: {(temporalEnabled ? "on" : "off")}    [U] Temporal upscaling: {(UpscaleFactor > 1 ? UpscaleFactor + "x" + UpscaleFactor : "off")}");
+		string upscaling = UpscaleFactor > 1 ? UpscaleFactor + "x" + UpscaleFactor : "off";
+		GUI.Label(new Rect(10, Screen.height - 55, 1000, 25),
+		          $"[F1-F4] Quality: {quality} ({Mathf.Max(stepAmount, 1)} steps)   [F5] Custom    [T] Temporal accumulation: {OnOff(temporalEnabled)}    [U] Temporal upscaling: {upscaling}");
+		GUI.Label(new Rect(10, Screen.height - 30, 1000, 25),
+		          $"[K] Empty space skipping: {OnOff(emptySpaceSkipping)}    [L] Light volume: {OnOff(useLightVolume)}    [O] Distance detail fade: {OnOff(detailFade && detailDistance > 0)}    [H] Cirrus: {OnOff(cirrus)}");
+	}
+
+	private static string OnOff(bool on) => on ? "on" : "off";
+
+	private QualityValues CurrentQualityValues() => new QualityValues {
+		stepAmount = stepAmount, textureDivide = textureDivide, upscaling = temporalUpscaling, detailDistance = detailDistance
+	};
+
+	// Sets the preset's values, Custom goes back to the inspector values.
+	private void ApplyQuality(CloudQuality preset) {
+		var values = preset switch {
+			CloudQuality.Low    => new QualityValues { stepAmount = 64,  textureDivide = 2, upscaling = UpscaleMode.FourByFour, detailDistance = 15000f },
+			CloudQuality.Medium => new QualityValues { stepAmount = 96,  textureDivide = 2, upscaling = UpscaleMode.TwoByTwo,   detailDistance = 25000f },
+			CloudQuality.High   => new QualityValues { stepAmount = 120, textureDivide = 2, upscaling = UpscaleMode.TwoByTwo,   detailDistance = 35000f },
+			CloudQuality.Ultra  => new QualityValues { stepAmount = 160, textureDivide = 2, upscaling = UpscaleMode.Off,        detailDistance = 0f },
+			_                   => customQuality
+		};
+		stepAmount        = values.stepAmount;
+		textureDivide     = values.textureDivide;
+		temporalUpscaling = values.upscaling;
+		detailDistance    = values.detailDistance;
+		appliedQuality    = preset;
 	}
 
 
@@ -510,15 +603,27 @@ public class NoiseController : MonoBehaviour {
 
 		CreateShadowTexture();
 		CreateCurveLuts();
+		CreateLightVolume();
 
-		volumetricsShader.SetTexture(KernelMain,    WeatherMap, weatherRenderTexture);
-		volumetricsShader.SetTexture(KernelMain,    PerlinTex1, perlinRenderTexture);
-		volumetricsShader.SetTexture(KernelMain,    WorleyTex1, worleyRenderTexture);
-		volumetricsShader.SetTexture(KernelMain,    Lut,        CumulusLut);
-		volumetricsShader.SetTexture(KernelShadows, WeatherMap, weatherRenderTexture);
-		volumetricsShader.SetTexture(KernelShadows, PerlinTex1, perlinRenderTexture);
-		volumetricsShader.SetTexture(KernelShadows, WorleyTex1, worleyRenderTexture);
-		volumetricsShader.SetTexture(KernelShadows, Lut,        CumulusLut);
+		foreach (int kernel in new[] { KernelMain, KernelShadows, KernelLightVolume }) {
+			volumetricsShader.SetTexture(kernel, WeatherMap, weatherRenderTexture);
+			volumetricsShader.SetTexture(kernel, PerlinTex1, perlinRenderTexture);
+			volumetricsShader.SetTexture(kernel, WorleyTex1, worleyRenderTexture);
+			volumetricsShader.SetTexture(kernel, Lut,        CumulusLut);
+		}
+		volumetricsShader.SetTexture(KernelMain,        LightVolume,    lightVolumeRT);
+		volumetricsShader.SetTexture(KernelLightVolume, LightVolumeOut, lightVolumeRT);
+	}
+
+	private void CreateLightVolume() {
+		lightVolumeRT = new RenderTexture(LightVolumeWidth, LightVolumeHeight, 0, RenderTextureFormat.RHalf, RenderTextureReadWrite.Linear) {
+			dimension         = TextureDimension.Tex3D,
+			volumeDepth       = LightVolumeWidth,
+			enableRandomWrite = true,
+			wrapMode          = TextureWrapMode.Clamp,
+			filterMode        = FilterMode.Bilinear,
+		};
+		lightVolumeRT.Create();
 	}
 
 	// (Re)creates the cloud textures whenever the resolution or the temporal upscaling setting changes.
@@ -631,21 +736,30 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetVector(WindOffset,      -windVelocity * deltaTime);
 			volumetricsShader.SetFloat(SkyDepth, SystemInfo.usesReversedZBuffer ? 0.0f : 1.0f);
 
-			// Snapped to whole texels so the ground shadows don't shimmer while the camera moves.
+			// With a day night cycle the clouds get its light (sun by day, moon by night) and its sky colour,
+			// the colour already has the sunset tint in it. Without one the settings above are used.
+			bool    cycle        = dayNightCycle && dayNightCycle.CloudLight;
+			Vector3 lightForward = cycle ? dayNightCycle.CloudLight.forward : sun.transform.forward;
+
+			// The shadow map holds the light through the clouds for rays starting at the cloud base, and the composite
+			// follows the light from each ground pixel up to the cloud base to look it up. So the map goes around
+			// where the light from the ground below the camera passes the cloud base (sideways by the base height
+			// / tan(elevation)), snapped to whole texels so the ground shadows don't shimmer while the camera moves.
+			var     camPosition  = cam.transform.position;
+			float   shadowPlane  = bounds.bounds.min.y;
+			Vector3 toLight      = -lightForward.normalized;
+			var     shadowFocus  = new Vector2(camPosition.x, camPosition.z);
+			if (toLight.y > 0.05f) shadowFocus += new Vector2(toLight.x, toLight.z) * (Mathf.Max(shadowPlane - Mathf.Min(camPosition.y, 0f), 0f) / toLight.y);
 			float shadowTexel  = shadowWorldSize / shadowRT.width;
-			var   camPosition  = cam.transform.position;
-			var   shadowCenter = new Vector4(Mathf.Floor(camPosition.x / shadowTexel) * shadowTexel,
-			                                 Mathf.Floor(camPosition.z / shadowTexel) * shadowTexel, 0, 0);
+			var   shadowCenter = new Vector4(Mathf.Floor(shadowFocus.x / shadowTexel) * shadowTexel,
+			                                 Mathf.Floor(shadowFocus.y / shadowTexel) * shadowTexel, 0, 0);
 			volumetricsShader.SetVector(ShadowCenter, shadowCenter);
 			Shader.SetGlobalVector(CloudShadowCenter, shadowCenter);
+			Shader.SetGlobalVector(CloudShadowLight, new Vector4(toLight.x, toLight.y, toLight.z, shadowPlane));
 
 			volumetricsShader.SetVector(CamPos,
 			                            new Vector4(cam.transform.position.x, cam.transform.position.y,
 			                                        cam.transform.position.z, 0.0f));
-
-			// With a day night cycle the clouds get its light (sun by day, moon by night) and its sky colour,
-			// the colour already has the sunset tint in it. Without one the settings above are used.
-			bool cycle = dayNightCycle && dayNightCycle.CloudLight;
 			volumetricsShader.SetVector(FogColor,          cycle ? dayNightCycle.CloudAmbient : fogColor);
 			volumetricsShader.SetVector(FogBaseColorNight, cycle ? dayNightCycle.CloudAmbient : fogColorNight);
 
@@ -653,7 +767,7 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetVector(LightContributionSunset, cycle ? lightContribution : lightContributionSunset);
 
 			volumetricsShader.SetVector(MainLightColor, cycle ? dayNightCycle.CloudLightColor : sun.color.linear);
-			volumetricsShader.SetVector(LightDirection, cycle ? dayNightCycle.CloudLight.forward : sun.transform.forward);
+			volumetricsShader.SetVector(LightDirection, lightForward);
 
 			volumetricsShader.SetVector(MinBounds, bounds.bounds.min);
 			volumetricsShader.SetVector(MaxBounds, bounds.bounds.max);
@@ -692,7 +806,17 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(PowderStrength,    powderStrength);
 			volumetricsShader.SetFloat(HorizonFade,       horizonFade);
 			volumetricsShader.SetFloat(WindShear,         windShear);
-			volumetricsShader.SetFloat(Coverage,          coverage);
+			volumetricsShader.SetFloat(Coverage,          cloudCoverage);
+
+			volumetricsShader.SetBool(EmptySpaceSkipping, emptySpaceSkipping);
+			// Detail amount = saturate(distance * x + y): full up to 60% of the detail distance, none at the distance.
+			volumetricsShader.SetVector(LodFade, detailFade && detailDistance > 0
+				                                     ? new Vector4(-1f / (0.4f * detailDistance), 2.5f, 0, 0)
+				                                     : new Vector4(0, 1, 0, 0));
+			volumetricsShader.SetVector(CirrusParams, new Vector4(cirrusHeight, cirrusCoverage, cirrusOpacity, cirrus ? 1 : 0));
+			volumetricsShader.SetVector(CirrusScale,  new Vector4(Mathf.Max(cirrusStreakSize.x, 1), Mathf.Max(cirrusStreakSize.y, 1),
+			                                                      Mathf.Max(cirrusPatchSize, 1), 0));
+			volumetricsShader.SetFloat(PixelAngle, 2f * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) / historyWrite.height);
 			volumetricsShader.SetInt(CurrentCloudType, currentType);
 			volumetricsShader.SetFloat(ShadowResolution1, shadowRT.width);
 			volumetricsShader.SetFloat(ShadowWorldSize,   shadowWorldSize);
@@ -720,6 +844,26 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetMatrix(PrevVp, oldProjectionMatrix);
 
 			foreach (var v in cloudTypes) v.SetValues(volumetricsShader);
+
+			// Rebuilt every frame (it costs about as much as a few rows of the raymarch), so it never lags behind the
+			// wind or the sun. Snapped to whole voxels so the voxels stay put in the world while the camera moves.
+			volumetricsShader.SetBool(UseLightVolumeID, useLightVolume);
+			if (useLightVolume) {
+				var   boxMin = bounds.bounds.min;
+				var   boxMax = bounds.bounds.max;
+				float voxel  = LightVolumeSize / LightVolumeWidth;
+				// Spans the box height, shifted so a layer of voxel centres sits just above the cloud base. Otherwise
+				// the filtering pulls in the clear air below and the cloud bottoms get too bright at low sun.
+				float layer     = Mathf.Max(boxMax.y - boxMin.y, 1) / LightVolumeHeight;
+				float cloudBase = cumulus.startAltitude + 1f;
+				float bottom    = cloudBase - (Mathf.Floor((cloudBase - boxMin.y) / layer) + 0.5f) * layer;
+				var   origin    = new Vector4(Mathf.Floor(camPosition.x / voxel) * voxel - LightVolumeSize * 0.5f, bottom,
+				                              Mathf.Floor(camPosition.z / voxel) * voxel - LightVolumeSize * 0.5f, voxel);
+				volumetricsShader.SetVector(LightVolumeOrigin, origin);
+				volumetricsShader.SetVector(LightVolumeSizeID, new Vector4(LightVolumeSize, layer * LightVolumeHeight, LightVolumeSize, 0));
+				volumetricsShader.SetVector(LightVolumeRes,    new Vector4(LightVolumeWidth, LightVolumeHeight, LightVolumeWidth, 0));
+				volumetricsShader.Dispatch(KernelLightVolume, LightVolumeWidth / 4, LightVolumeHeight / 4, LightVolumeWidth / 4);
+			}
 
 			// Rounded up, the kernels skip the threads that fall outside the textures.
 			volumetricsShader.Dispatch(KernelMain,    ThreadGroups(currentRT.width),    ThreadGroups(currentRT.height),    1);
@@ -750,6 +894,10 @@ public class NoiseController : MonoBehaviour {
 			new RenderTexture(512, 512, 0, RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Linear);
 		weatherRenderTexture.enableRandomWrite = true;
 		weatherRenderTexture.wrapMode          = TextureWrapMode.Repeat;
+		// The cirrus samples it at a distance, mips keep that from aliasing. Only mip 0 gets written by the kernel.
+		weatherRenderTexture.useMipMap         = true;
+		weatherRenderTexture.autoGenerateMips  = false;
+		weatherRenderTexture.filterMode        = FilterMode.Trilinear;
 		weatherRenderTexture.Create();
 		noiseShader.SetTexture(2, WeatherMap, weatherRenderTexture);
 		Shader.SetGlobalTexture(WeatherTexture, weatherRenderTexture);
@@ -764,7 +912,8 @@ public class NoiseController : MonoBehaviour {
 		weatherNoise.SetValues(noiseShader);
 		
 		noiseShader.Dispatch(2, weatherRenderTexture.width / 8, weatherRenderTexture.height / 8, 1);
-		
+		weatherRenderTexture.GenerateMips();
+
 		int[] readBuffer = new int[2];
 		minMaxValues.GetData(readBuffer);
 		Debug.Log(readBuffer[0] / 10000.0f + " " + readBuffer[1] / 10000.0f);

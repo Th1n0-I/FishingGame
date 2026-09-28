@@ -31,6 +31,8 @@ Shader "Custom/VolumetricFog"
             float _ShadowWorldSize;
             // Center of the cloud shadow map, snapped to whole texels by NoiseController.
             float4 _CloudShadowCenter;
+            // xyz: direction to the light the clouds use, w: height of the cloud base where the shadow map rays start.
+            float4 _CloudShadowLight;
             static const float _ShadowStrength = 0.4;
             
             half4 frag(Varyings IN) : SV_Target
@@ -48,16 +50,21 @@ Shader "Custom/VolumetricFog"
                     bool isSky = depth >= 1.0;
                 #endif
                 
-                if (!isSky)
+                // With the light near or below the horizon there is no direct light to shadow.
+                if (!isSky && _CloudShadowLight.y > 0.05)
                 {
                     float3 worldPos = ComputeWorldSpacePosition(IN.texcoord, depth, UNITY_MATRIX_I_VP);
-                    float2 suv = (worldPos.xz - _CloudShadowCenter.xy) / _ShadowWorldSize + 0.5;
-                    
+                    // Follow the light up to the cloud base, that is where this point's shadow ray starts in the map.
+                    float2 base_xz = worldPos.xz + _CloudShadowLight.xz * ((_CloudShadowLight.w - worldPos.y) / _CloudShadowLight.y);
+                    float2 suv = (base_xz - _CloudShadowCenter.xy) / _ShadowWorldSize + 0.5;
+
                     if (all(suv >= 0) && all(suv <= 1))
                     {
                         float shadow = SAMPLE_TEXTURE2D(shadowRT, sampler_LinearClamp, suv).r;
-                        // Fade the shadows out near the edge of the shadow map instead of a hard square cutoff.
+                        // Fade the shadows out near the edge of the shadow map instead of a hard square cutoff,
+                        // and as the light gets close to the horizon.
                         float edge = saturate(min(min(suv.x, suv.y), min(1.0 - suv.x, 1.0 - suv.y)) * 10.0);
+                        edge *= saturate((_CloudShadowLight.y - 0.05) * 10.0);
                         color.rgb *= lerp(1.0, lerp(_ShadowStrength, 1.0, shadow), edge);
                     }
                 }

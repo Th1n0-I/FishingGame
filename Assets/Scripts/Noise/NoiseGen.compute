@@ -255,7 +255,14 @@ void gen_weather (uint3 id : SV_DispatchThreadID)
         cloud_type = 0.5 + saturate(distance(uvw.xy, float2(0.2, 0.2))  * 10 - 0.5);
     }
     
-    weather_map[id.xy] = float4(saturate(result), cloud_type, 0.0, 1.0);
+    // Cirrus, b: where the patches are, a: the wisps, which VolumetricCompute stretches along the wind.
+    // Other z slices than the cloud noise, so the cirrus doesn't just sit on top of the clouds.
+    float cirrus_patches = perlin_fbm(float3(uvw.xy, 0.37), Unpack(float4(2, 0.5, 2, 4)));
+    float cirrus_wisps = perlin_fbm(float3(uvw.xy, 0.71), Unpack(float4(4, 0.6, 2, 6)));
+
+    // The ranges stretch the middle 90% of each fbm to 0..1.
+    weather_map[id.xy] = float4(saturate(result), cloud_type, saturate(remap(cirrus_patches, 0.42, 0.62, 0.0, 1.0)),
+                                saturate(remap(cirrus_wisps, 0.38, 0.62, 0.0, 1.0)));
 }
 
 

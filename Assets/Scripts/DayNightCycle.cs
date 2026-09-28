@@ -98,7 +98,8 @@ public class DayNightCycle : MonoBehaviour {
 		if (Time.unscaledTime > messageUntil) return;
 		int hours   = (int)timeOfDay;
 		int minutes = (int)((timeOfDay - hours) * 60);
-		GUI.Label(new Rect(10, Screen.height - 55, 800, 25),
+		// Above the two lines NoiseController shows.
+		GUI.Label(new Rect(10, Screen.height - 80, 800, 25),
 		          $"Time {hours:00}:{minutes:00}{(paused ? " (paused)" : "")}    [P] pause    hold [ or ] to scrub through the day");
 	}
 

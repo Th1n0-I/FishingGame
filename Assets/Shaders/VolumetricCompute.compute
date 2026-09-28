@@ -2,6 +2,7 @@
 #pragma kernel CSMain
 #pragma kernel Resolve
 #pragma kernel CloudsShadows
+#pragma kernel LightVolume
 
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
@@ -90,8 +91,33 @@ float powder_strength;
 float horizon_fade;
 float wind_shear;
 
+// Skip empty space with bigger steps (see raymarch).
+bool empty_space_skipping;
+// How much detail the clouds get at a distance: saturate(distance * x + y), 1 = full detail.
+float4 lod_fade;
+
+// Optical depth of the far part of the light cone, baked around the camera every frame by the LightVolume kernel.
+bool use_light_volume;
+Texture3D<float> light_volume;
+RWTexture3D<float> light_volume_out;
+// xyz: world position of the lower corner, w: size of one voxel.
+float4 light_volume_origin;
+// xyz: size in meters.
+float4 light_volume_size;
+// xyz: voxel count.
+float4 light_volume_res;
+
+// Cirrus sheet. x: height, y: coverage, z: opacity, w: 1 = on.
+float4 cirrus_params;
+// x: streak length, y: streak width, z: patch size, all in meters.
+float4 cirrus_scale;
+// Angle of one resolved cloud pixel in radians, picks the cirrus texture mip.
+float pixel_angle;
+
 // Height fraction of the last get_density() call, used for the ambient gradient.
 static float last_height_frac;
+// Undetailed density of the last get_density() call, 0 means nothing can be there.
+static float last_bound;
 
 int _StepAmount;
 
@@ -225,8 +251,12 @@ float remap(float v, float inMin, float inMax, float outMin, float outMax)
     return outMin + (v - inMin) / (inMax - inMin) * (outMax - outMin);
 }
 
-float get_density(float3 worldPos, bool lowDetail = false)
+// detail_amount 1 = full detail, 0 = erode by the average detail instead, which skips the detail texture (distance LOD
+// and the cheap shadow samples). bound_only returns the density before the detail erodes it: the detail can only take
+// density away, so where this is 0 the full density is 0 too.
+float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = false)
 {
+    last_bound = 0;
     /*float4 weather = weather_map.SampleLevel(sampler_weather_map, worldPos.xz / 16000, 0);
     
     float height_frac = (worldPos.y - cumulus_y_min) / (cumulus_y_max - cumulus_y_min);
@@ -364,19 +394,79 @@ float get_density(float3 worldPos, bool lowDetail = false)
     base = remap(base, (1 - detail) * detail_fbm_mult, 1.0, 0.0, 1.0);
     base = base * shapeGradient;
     base = saturate(remap(base, saturate((1 - coverage) + weather.r - cloud.coverage), 1.0, 0.0, 1.0));
+    float scale = full_density_mult * cloud.density * densityGradient;
+    last_bound = base * scale;
     // The detail can only erode, so an empty base stays empty and the detail sample can be skipped.
-    if (base <= 0) return 0;
-    // Cheap version for the long shadow sample and the ground shadows: erode by the average detail instead.
-    if (lowDetail) return max(remap(base, 0.5 * detail_mult, 1.0, 0.0, 1.0) * full_density_mult * cloud.density * densityGradient, 0.0);
-    float3 low_quality_detail_rgb = _WorleyTex.SampleLevel(sampler_WorleyTex,
-                                                           (worldPos - wind_travel.xyz - float3(0.0, wind_travel.w, 0.0)) / _DetailSize, 0).rgb;
-    float low_quality_detail = low_quality_detail_rgb.r * 0.625 + low_quality_detail_rgb.g * 0.25 +
-        low_quality_detail_rgb.b * 0.125;
-    low_quality_detail = lerp(low_quality_detail, 1 - low_quality_detail, saturate(height_frac * 10));
-    float result = remap(base, low_quality_detail * detail_mult, 1.0, 0.0, 1.0);
+    if (bound_only || last_bound <= 0) return max(last_bound, 0.0);
+    // 0.5 is the average of the detail below, far away it fades to that so the texture isn't needed there.
+    float erosion = 0.5;
+    if (detail_amount > 0)
+    {
+        float3 low_quality_detail_rgb = _WorleyTex.SampleLevel(sampler_WorleyTex,
+                                                               (worldPos - wind_travel.xyz - float3(0.0, wind_travel.w, 0.0)) / _DetailSize, 0).rgb;
+        float low_quality_detail = low_quality_detail_rgb.r * 0.625 + low_quality_detail_rgb.g * 0.25 +
+            low_quality_detail_rgb.b * 0.125;
+        low_quality_detail = lerp(low_quality_detail, 1 - low_quality_detail, saturate(height_frac * 10));
+        erosion = lerp(0.5, low_quality_detail, detail_amount);
+    }
+    float result = remap(base, erosion * detail_mult, 1.0, 0.0, 1.0);
 
+    return max(result * scale, 0.0);
+}
 
-    return max(result * full_density_mult * cloud.density * densityGradient, 0.0);
+// Full detail up close, fading to the average detail far away.
+float lod_detail(float cam_distance)
+{
+    return saturate(cam_distance * lod_fade.x + lod_fade.y);
+}
+
+// Optical depth towards the light along a widening cone: samples 1 to 5 one shadow step apart, sample 6 three steps
+// long and without detail. first and last pick which samples to take, so the light volume can bake the far part
+// and the raymarch only takes the near part itself.
+float cone_optical_depth(float3 pos, float jitter, int first, int last, float detail_amount)
+{
+    float3 light_dir = normalize(-_LightDirection.xyz);
+    float3 entry = pos + light_dir * jitter * shadow_step_size;
+    float3 right = normalize(cross(light_dir, float3(0, 1, 0)));
+    float3 up = normalize(cross(light_dir, right));
+    float2 a[6] = {
+        normalize(float2(-0.6, 0.94)), normalize(float2(-0.97, -0.28)), normalize(float2(0.19, -0.71)),
+        normalize(float2(-0.73, -0.2)), normalize(float2(0.42, -0.38)), normalize(float2(-0.81, 0.19))
+    };
+
+    float od = 0;
+    for (int i = first; i <= last; i++)
+    {
+        float travelled = shadow_step_size * (i < 6 ? i : 8);
+        float step_size = shadow_step_size * (i < 6 ? 1 : 3);
+        float2 offset = a[i - 1] * (travelled * shadow_cone_spread);
+        float3 p = entry + light_dir * travelled + right * offset.x + up * offset.y;
+        od += get_density(p, i < 6 ? detail_amount : 0.0) * step_size;
+    }
+    return od;
+}
+
+// How much of the far light cone comes from the light volume: 1 inside it, fading to 0 towards its edge.
+float light_volume_weight(float3 p)
+{
+    if (!use_light_volume) return 0.0;
+    float2 half_size = light_volume_size.xz * 0.5;
+    float2 to_edge = half_size - abs(p.xz - (light_volume_origin.xz + half_size));
+    // One voxel of margin for the filtering, then 2 km to fade over to the cone.
+    return saturate((min(to_edge.x, to_edge.y) - light_volume_origin.w) / 2000.0);
+}
+
+// Optical depth towards the light from pos, the same as all 6 cone samples.
+float light_optical_depth(float3 pos, float jitter, float detail_amount)
+{
+    float od = cone_optical_depth(pos, jitter, 1, 2, detail_amount);
+    float volume_weight = light_volume_weight(pos);
+    float far_od = 0;
+    if (volume_weight > 0)
+        far_od = light_volume.SampleLevel(sampler_linear_clamp, (pos - light_volume_origin.xyz) / light_volume_size.xyz, 0) * volume_weight;
+    if (volume_weight < 1)
+        far_od += cone_optical_depth(pos, jitter, 3, 6, detail_amount) * (1 - volume_weight);
+    return od + far_od;
 }
 
 float2 get_box_bounds(float3 worldPos, float3 rayDir)
@@ -453,16 +543,46 @@ float3 calculateWorldPos(float2 uv, float depth, float4x4 inv_vp)
     return worldPos.xyz / worldPos.w;
 }
 
-float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogCol, float stepSize, int maxSteps,
-                float viewLength, float transmittance, float2 id, inout float2 depth_acc)
+// Sun (or moon at night) light for the clouds.
+float3 cloud_light_color()
 {
     float sun_elevation = -_LightDirection.y;
     float t = smoothstep(0.0, 0.25, sun_elevation);
     float sun_up = smoothstep(-0.1, 0.05, sun_elevation);
     // x3 keeps Light Contribution about as bright as the old beer-powder lighting.
-    float3 light_contribution = lerp(light_contribution_sunset.rgb, light_contribution_day.rgb, t) * _MainLightColor.rgb * sun_up * 3.0;
-    float3 ambient_color = lerp(fog_base_color_night.rgb, fog_base_color_day.rgb, sun_up);
-    float distanceTravelled = ign(id) * stepSize;
+    return lerp(light_contribution_sunset.rgb, light_contribution_day.rgb, t) * _MainLightColor.rgb * sun_up * 3.0;
+}
+
+// Sky light for the clouds.
+float3 cloud_ambient_color()
+{
+    float sun_up = smoothstep(-0.1, 0.05, -_LightDirection.y);
+    return lerp(fog_base_color_night.rgb, fog_base_color_day.rgb, sun_up);
+}
+
+// How much light scatters towards the camera through shadow_od of cloud.
+// Multiple scattering (Wrenninge 2013): every octave goes deeper, scatters less and more evenly.
+float scattered_light(float shadow_od, float cos_theta)
+{
+    float sun_light = 0;
+    float extinction = 1, scattering = 1, eccentricity = 1;
+    for (int o = 0; o < 3; o++)
+    {
+        sun_light += scattering * exp(-shadow_od * extinction) *
+            dual_lobe_phase(_LightScattering * eccentricity, back_scattering * eccentricity, cos_theta);
+        extinction *= 0.5;
+        scattering *= 0.5;
+        eccentricity *= 0.5;
+    }
+    return sun_light;
+}
+
+float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogCol, float stepSize, int maxSteps,
+                float viewLength, float transmittance, float2 id, inout float2 depth_acc)
+{
+    float3 light_contribution = cloud_light_color();
+    float3 ambient_color = cloud_ambient_color();
+    float jitter = ign(id);
     float3 rayDir = normalize(endPoint - startPoint);
     float startDist = distance(startPoint, camPoint);
     if (startDist > viewLength) return float4(fogCol, transmittance);
@@ -470,59 +590,76 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
     float maxDist = min(distance(startPoint, endPoint), viewLength - startDist);
 
     float cos_theta = dot(rayDir, -_LightDirection.xyz);
-    int steps = 0;
     float3 fogColor = fogCol;
 
+    // Empty space skipping: while nothing is around, only every 3rd step gets sampled, and only for the base shape
+    // (no detail, no light). When that finds something the march goes back to just after the last empty sample and
+    // takes normal steps again, until 4 samples in a row have no base shape either. Every sample sits on the normal
+    // step grid, so inside the clouds nothing changes. The coarse grid gets its own random offset of 0 to 2 steps,
+    // otherwise the same 2 of every 3 steps would never be checked.
+    float phase = jitter;
+    uint2 cell = (uint2)id;
+    uint hash = (cell.x * 73856093u) ^ (cell.y * 19349663u);
+    hash ^= hash >> 13;
+    hash *= 0x5bd1e995u;
+    hash ^= hash >> 15;
+    int coarse_offset = (int)(hash % 3u);
+    bool coarse = empty_space_skipping;
+    int i = coarse ? coarse_offset : 0;
+    int last_empty = -1;
+    int empty_samples = 0;
+    // Every normal step gets taken at most once and the coarse samples come on top of that, twice is plenty.
+    int iterations = 0;
+    int max_iterations = maxSteps * 2;
+
     // Stops at 1% transmittance, what is left behind that can't be seen anyway.
-    while (distanceTravelled < maxDist && steps < maxSteps && transmittance > 0.01)
+    while (iterations < max_iterations && transmittance > 0.01)
     {
+        float distanceTravelled = (i + phase) * stepSize;
+        if (distanceTravelled >= maxDist) break;
+        iterations++;
         float3 worldPos = startPoint + rayDir * distanceTravelled;
-        distanceTravelled += stepSize;
-        steps++;
-        float density = get_density(worldPos);
-        if (density <= 0) continue;
+        float cam_distance = distance(worldPos, camPoint);
+        float detail_amount = lod_detail(cam_distance);
+        float density = get_density(worldPos, detail_amount, coarse);
+        if (coarse)
+        {
+            if (density > 0)
+            {
+                coarse = false;
+                empty_samples = 0;
+                i = last_empty + 1;
+            }
+            else
+            {
+                last_empty = i;
+                i += 3;
+            }
+            continue;
+        }
+        i++;
+        if (density <= 0)
+        {
+            last_empty = i - 1;
+            empty_samples = last_bound > 0 ? 0 : empty_samples + 1;
+            if (empty_space_skipping && empty_samples >= 4)
+            {
+                // Onto the next sample of the coarse grid.
+                coarse = true;
+                empty_samples = 0;
+                uint behind = (uint)(i - coarse_offset) % 3u;
+                if (behind > 0) i += 3 - (int)behind;
+            }
+            continue;
+        }
+        empty_samples = 0;
         float height_frac = saturate(last_height_frac);
-        float3 shadowRayDir = normalize(-_LightDirection.xyz);
-        float3 shadowRayEntryPos = worldPos + shadowRayDir * ign(id.xy) * shadow_step_size;
-        float shadow_od = 0;
-        float shadow_distance_travelled = 0;
-        float3 right = normalize(cross(shadowRayDir, float3(0, 1, 0)));
-        float3 up = normalize(cross(shadowRayDir, right));
-        float2 a[6] = {
-            normalize(float2(-0.6, 0.94)), normalize(float2(-0.97, -0.28)), normalize(float2(0.19, -0.71)),
-            normalize(float2(-0.73, -0.2)), normalize(float2(0.42, -0.38)), normalize(float2(-0.81, 0.19))
-        };
-
-        for (int i = 1; i <= 6; i++)
-        {
-            //float step_size = i * shadow_step_size;
-            float step_size = shadow_step_size * (i == 6 ? 3 : 1);
-            shadow_distance_travelled += step_size;
-            float3 shadowRayPos = shadowRayEntryPos + shadowRayDir * shadow_distance_travelled + right *
-                shadow_distance_travelled * shadow_cone_spread * a[i - 1].x + up * shadow_distance_travelled *
-                shadow_cone_spread * a[i - 1].y;
-            float shadowDensity;
-            if (i < 6) shadowDensity = get_density(shadowRayPos) * step_size;
-            else shadowDensity = get_density(shadowRayPos, true) * step_size;
-            shadow_od += shadowDensity;
-        }
-
-        // Multiple scattering (Wrenninge 2013): every octave goes deeper, scatters less and more evenly.
-        float sun_light = 0;
-        float extinction = 1, scattering = 1, eccentricity = 1;
-        for (int o = 0; o < 3; o++)
-        {
-            sun_light += scattering * exp(-shadow_od * extinction) *
-                dual_lobe_phase(_LightScattering * eccentricity, back_scattering * eccentricity, cos_theta);
-            extinction *= 0.5;
-            scattering *= 0.5;
-            eccentricity *= 0.5;
-        }
+        float shadow_od = light_optical_depth(worldPos, jitter, detail_amount);
+        float sun_light = scattered_light(shadow_od, cos_theta);
         // Powder darkens edges when the sun is behind you, fades out when looking towards the sun.
         float powder = lerp(1.0, 1.0 - exp(-2.0 * shadow_od), powder_strength * saturate(0.5 - 0.5 * cos_theta));
         float3 ambient = ambient_color * lerp(ambient_bottom, 1.0, height_frac);
         // Fade far samples out so the horizon turns into haze instead of noise.
-        float cam_distance = distance(worldPos, camPoint);
         float fade = exp(-cam_distance / max(horizon_fade, 1.0));
         float step_opacity = (1.0 - exp(-density * stepSize)) * fade;
         // Average distance weighted by how much each step shows up in the final pixel.
@@ -532,6 +669,117 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
         transmittance *= 1.0 - step_opacity;
     }
     return float4(fogColor.rgb, transmittance);
+}
+
+// Marches the part of the view ray inside the outer sphere (and the box when combined), minus the inner sphere,
+// which can split it in two. res: premultiplied colour so far and the transmittance.
+float4 march_cloud_layer(float3 entryPos, float3 rayDir, float viewLength, float2 jitter_id, float4 res,
+                         inout float2 depth_acc)
+{
+    if (!_UseBoundingSphere) return res;
+
+    float2 sphere1intersect = get_sphere_bounds(entryPos, rayDir, _SphereMinRadius);
+    float2 sphere2intersect = get_sphere_bounds(entryPos, rayDir, _SphereMaxRadius);
+    float2 boxIntersect = get_box_bounds(entryPos, rayDir);
+
+    float tEnter = max(0.0, sphere2intersect.x);
+    float tExit = sphere2intersect.y;
+
+    // The sphere is behind the player.
+    if (tExit <= tEnter) return res;
+
+    if (combine_bounds)
+    {
+        tEnter = max(tEnter, boxIntersect.x);
+        tExit = min(tExit, boxIntersect.y);
+        if (tExit <= tEnter) return res;
+    }
+
+    float2 seg0 = float2(tEnter, tExit);
+    float2 seg1 = float2(0.0, 0.0);
+    bool split = false;
+
+    float innerA = sphere1intersect.x;
+    float innerB = sphere1intersect.y;
+    bool innerHits = innerB > 0 && innerA < innerB;
+
+    if (innerHits)
+    {
+        innerA = max(innerA, tEnter);
+        innerB = min(innerB, tExit);
+        if (innerA < innerB)
+        {
+            bool clipsStart = innerA <= tEnter;
+            bool clipsEnd = innerB >= tExit;
+            if (clipsStart && clipsEnd) return res; // The box is fully inside the smaller sphere.
+            else if (clipsStart) seg0.x = innerB;
+            else if (clipsEnd) seg0.y = innerA;
+            else
+            {
+                seg0.y = innerA;
+                seg1 = float2(innerB, tExit);
+                split = true;
+            }
+        }
+    }
+
+    int steps = split ? max(_StepAmount / 2, 1) : _StepAmount;
+    float3 a0 = entryPos + rayDir * seg0.x;
+    float3 b0 = entryPos + rayDir * seg0.y;
+    res = raymarch(a0, b0, entryPos, res.rgb, distance(a0, b0) / steps, steps, viewLength, res.a, jitter_id, depth_acc);
+    if (split)
+    {
+        float3 a1 = entryPos + rayDir * seg1.x;
+        float3 b1 = entryPos + rayDir * seg1.y;
+        res = raymarch(a1, b1, entryPos, res.rgb, distance(a1, b1) / steps, steps, viewLength, res.a, jitter_id,
+                       depth_acc);
+    }
+    return res;
+}
+
+// Thin, high ice clouds: a flat sheet at cirrus height streaked along the wind, one sample per pixel. Returns the
+// premultiplied colour and the opacity, and how far away it is for the reprojection.
+float4 cirrus(float3 cam, float3 ray_dir, float view_length, out float distance_to)
+{
+    distance_to = 0;
+    if (cirrus_params.w <= 0) return float4(0.0, 0.0, 0.0, 0.0);
+    float t = (cirrus_params.x - cam.y) / ray_dir.y;
+    // Behind the camera, behind terrain, or so far out that it has faded away anyway.
+    if (!(t > 0) || t > min(view_length, 300000.0)) return float4(0.0, 0.0, 0.0, 0.0);
+    distance_to = t;
+
+    // Moves with the same wind as the other clouds, so the reprojection follows it.
+    float2 p = cam.xz + ray_dir.xz * t - wind_travel.xz;
+    float2 along = wind_direction.xy;
+    float2 across = float2(-along.y, along.x);
+    // Pick the mips from how much of the sheet one pixel covers: t * pixel_angle sideways and stretched by 1 / y
+    // along the view towards the horizon. The streaks are squashed across the wind, so both directions get
+    // measured in their texels and the bigger one wins (no aliasing, a bit of blur).
+    uint map_width, map_height;
+    weather_map.GetDimensions(map_width, map_height);
+    float side_extent = t * pixel_angle * map_width;
+    float depth_extent = side_extent / max(abs(ray_dir.y), 0.01);
+    float2 view_flat = ray_dir.xz / max(length(ray_dir.xz), 1e-4);
+    float view_along = dot(view_flat, along);
+    float view_across = dot(view_flat, across);
+    float depth_texels = length(float2(view_along / cirrus_scale.x, view_across / cirrus_scale.y)) * depth_extent;
+    float side_texels = length(float2(view_across / cirrus_scale.x, view_along / cirrus_scale.y)) * side_extent;
+    float streak_lod = log2(max(max(depth_texels, side_texels), 1.0));
+    float patch_lod = log2(max(depth_extent / cirrus_scale.z, 1.0));
+
+    // The wisps are the a channel stretched along the wind. A second, smaller and slightly turned copy hides the tiling.
+    float2 streak_uv = float2(dot(p, along) / cirrus_scale.x, dot(p, across) / cirrus_scale.y);
+    float2 turned = float2(dot(streak_uv, float2(0.99, 0.14)), dot(streak_uv, float2(-0.14, 0.99)));
+    float wisps = weather_map.SampleLevel(sampler_weather_map, streak_uv, streak_lod).a;
+    wisps *= weather_map.SampleLevel(sampler_weather_map, turned * 1.61 + 0.37, streak_lod + 0.7).a;
+    float patches = weather_map.SampleLevel(sampler_weather_map, p / cirrus_scale.z, patch_lod).b;
+
+    float density = saturate(remap(patches, 1.0 - cirrus_params.y, 1.0, 0.0, 1.0)) * saturate(wisps * 3.0);
+    float opacity = density * cirrus_params.z * exp(-t / max(horizon_fade, 1.0));
+    // Thin enough that nothing shadows it, so it gets the light the cloud layer gets at its edges.
+    float cos_theta = dot(ray_dir, -_LightDirection.xyz);
+    float3 color = cloud_light_color() * scattered_light(0.0, cos_theta) + cloud_ambient_color();
+    return float4(color * opacity, opacity);
 }
 
 [numthreads(8,8,1)]
@@ -557,71 +805,37 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     float3 rayDir = normalize(viewDir);
 
 
-    if (_UseBoundingSphere)
+    // rgb: premultiplied colour, a: transmittance. The cirrus is in front of the cloud layer when the camera is
+    // above it and behind it otherwise.
+    float4 res = float4(0.0, 0.0, 0.0, 1.0);
+    float2 depth_acc = float2(0.0, 0.0);
+    float cirrus_distance;
+    float4 cirrus_layer = cirrus(entryPos, rayDir, viewLength, cirrus_distance);
+    bool above_cirrus = entryPos.y > cirrus_params.x;
+    if (above_cirrus)
     {
-        float2 sphere1intersect = get_sphere_bounds(entryPos, rayDir, _SphereMinRadius);
-        float2 sphere2intersect = get_sphere_bounds(entryPos, rayDir, _SphereMaxRadius);
-        float2 boxIntersect = get_box_bounds(entryPos, rayDir);
-
-
-        float tEnter = max(0.0, sphere2intersect.x);
-        float tExit = sphere2intersect.y;
-
-        // The sphere is behind the player.
-        if (tExit <= tEnter) return;
-
-        if (combine_bounds)
-        {
-            tEnter = max(tEnter, boxIntersect.x);
-            tExit = min(tExit, boxIntersect.y);
-            if (tExit <= tEnter) return;
-        }
-
-        float2 seg0 = float2(tEnter, tExit);
-        float2 seg1 = float2(0.0, 0.0);
-        bool split = false;
-
-        float innerA = sphere1intersect.x;
-        float innerB = sphere1intersect.y;
-        bool innerHits = innerB > 0 && innerA < innerB;
-
-        if (innerHits)
-        {
-            innerA = max(innerA, tEnter);
-            innerB = min(innerB, tExit);
-            if (innerA < innerB)
-            {
-                bool clipsStart = innerA <= tEnter;
-                bool clipsEnd = innerB >= tExit;
-                if (clipsStart && clipsEnd) return; // The box is fully inside the smaller sphere.
-                else if (clipsStart) seg0.x = innerB;
-                else if (clipsEnd) seg0.y = innerA;
-                else
-                {
-                    seg0.y = innerA;
-                    seg1 = float2(innerB, tExit);
-                    split = true;
-                }
-            }
-        }
-
-        float steps = split ? _StepAmount * 0.5 : _StepAmount;
-        float3 a0 = entryPos + rayDir * seg0.x;
-        float3 b0 = entryPos + rayDir * seg0.y;
-        // Starts at 0, the result is premultiplied (ambient is added inside the march now).
-        float2 depth_acc = float2(0.0, 0.0);
-        float4 res = raymarch(a0, b0, entryPos, float3(0, 0, 0),
-                              distance(a0, b0) / steps, steps, viewLength, 1.0, jitter_id, depth_acc);
-        if (split)
-        {
-            float3 a1 = entryPos + rayDir * seg1.x;
-            float3 b1 = entryPos + rayDir * seg1.y;
-            res = raymarch(a1, b1, entryPos, res.rgb, distance(a1, b1) / steps, steps, viewLength, res.a, jitter_id,
-                           depth_acc);
-        }
-        Result[id.xy] = float4(res.rgb, 1.0 - saturate((res.a <= 0.01 ? 0 : res.a)));
-        ResultDepth[id.xy] = depth_acc.y > 0.001 ? depth_acc.x / depth_acc.y : 0.0;
+        depth_acc += float2(cirrus_distance, 1.0) * cirrus_layer.a;
+        res = float4(cirrus_layer.rgb, 1.0 - cirrus_layer.a);
     }
+    res = march_cloud_layer(entryPos, rayDir, viewLength, jitter_id, res, depth_acc);
+    if (!above_cirrus)
+    {
+        depth_acc += float2(cirrus_distance, 1.0) * (res.a * cirrus_layer.a);
+        res.rgb += res.a * cirrus_layer.rgb;
+        res.a *= 1.0 - cirrus_layer.a;
+    }
+    Result[id.xy] = float4(res.rgb, 1.0 - saturate((res.a <= 0.01 ? 0 : res.a)));
+    ResultDepth[id.xy] = depth_acc.y > 0.001 ? depth_acc.x / depth_acc.y : 0.0;
+}
+
+// Builds the optical depth volume for the far part of the light cone (samples 3 to 6), from every voxel centre
+// with the average jitter. It gets rebuilt every frame, so the wind and the day night cycle never make it stale.
+[numthreads(4,4,4)]
+void LightVolume(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id >= (uint3)light_volume_res.xyz)) return;
+    float3 voxel_pos = light_volume_origin.xyz + ((float3)id + 0.5) * light_volume_size.xyz / light_volume_res.xyz;
+    light_volume_out[id] = cone_optical_depth(voxel_pos, 0.5, 3, 6, lod_detail(distance(voxel_pos, _CamPos.xyz)));
 }
 
 // Bicubic (Catmull-Rom) sample made from 9 bilinear taps. The history gets resampled every frame,
@@ -749,7 +963,7 @@ void CloudsShadows(uint3 id : SV_DispatchThreadID)
     while (steps < shadow_steps)
     {
         float3 p = shadow_start_pos + rayDir * step_size * (steps + 0.5);
-        optical_depth += get_density(p, true) * step_size;
+        optical_depth += get_density(p, 0.0) * step_size;
         steps++;
     }
 
