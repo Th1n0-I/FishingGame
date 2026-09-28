@@ -1,0 +1,50 @@
+# Builds a Windows version of the game on every push. Download it from the Actions tab (Artifacts at the bottom of a run).
+# Needs the repo secrets UNITY_LICENSE (contents of Unity_lic.ulf), UNITY_EMAIL and UNITY_PASSWORD.
+name: Build Windows
+
+on:
+  workflow_dispatch:
+  push:
+    paths-ignore: ['**.md']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # The Unity image is big, so make some room on the runner first.
+      - uses: jlumbroso/free-disk-space@v1.3.1
+
+      - uses: actions/checkout@v4
+
+      # Cache the LFS files so every build doesn't use up GitHub's LFS bandwidth.
+      - run: git lfs ls-files -l | cut -d' ' -f1 | sort > .lfs-assets-id
+      - uses: actions/cache@v4
+        with:
+          path: .git/lfs
+          key: lfs-${{ hashFiles('.lfs-assets-id') }}
+      - run: git lfs pull
+
+      # Reusing the Library folder makes every build after the first one a lot faster.
+      - uses: actions/cache@v4
+        with:
+          path: Library
+          key: Library-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
+          restore-keys: Library-
+
+      - uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          targetPlatform: StandaloneWindows64
+          buildName: FishingGame
+          buildMethod: CIBuild.BuildWindows
+          # Some .asset files match the LFS rule in .gitattributes but were committed normally,
+          # so git can report them as changed on the runner and GameCI would refuse to build.
+          allowDirtyBuild: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FishingGame-Windows
+          path: build/StandaloneWindows64
