@@ -1,6 +1,6 @@
 // Each #kernel tells which function to compile; you can have many kernels
 #pragma kernel CSMain
-#pragma kernel Reproject
+#pragma kernel Resolve
 #pragma kernel CloudsShadows
 
 // Create a RenderTexture with enableRandomWrite flag and set it
@@ -21,16 +21,24 @@ SamplerState sampler_DepthTex;
 Texture2D<float4> weather_map;
 SamplerState sampler_weather_map;
 
+// Last frame's resolved clouds and this frame's raymarch, used by the Resolve kernel.
 Texture2D<float4> rendertexture_old;
-SamplerState sampler_rendertexture_old;
+Texture2D<float4> current_frame;
+SamplerState sampler_linear_clamp;
 
 Texture2D<float> cumulus_lut;
 SamplerState sampler_cumulus_lut;
 
-int TextureDivide;
-
-int ScreenWidth;
-int ScreenHeight;
+// xy: size of the resolved cloud textures, zw: size of this frame's raymarch texture.
+float4 cloud_size;
+int frame_index;
+bool history_valid;
+float temporal_blend;
+// How far the wind moved the clouds since last frame.
+float4 wind_offset;
+float4 shadow_center;
+// Depth buffer value of the sky, 0 with reversed Z.
+float sky_depth;
 
 float4x4 _InvVP;
 float4x4 prev_vp;
@@ -334,8 +342,12 @@ float get_density(float3 worldPos, bool lowDetail = false)
     base = remap(base, (1 - detail) * detail_fbm_mult, 1.0, 0.0, 1.0);
     base = base * shapeGradient;
     base = saturate(remap(base, saturate((1 - coverage) + weather.r - cloud.coverage), 1.0, 0.0, 1.0));
+    // The detail can only erode, so an empty base stays empty and the detail sample can be skipped.
+    if (base <= 0) return 0;
+    // Cheap version for the long shadow sample and the ground shadows: erode by the average detail instead.
+    if (lowDetail) return max(remap(base, 0.5 * detail_mult, 1.0, 0.0, 1.0) * full_density_mult * cloud.density * densityGradient, 0.0);
     float3 low_quality_detail_rgb = _WorleyTex.SampleLevel(sampler_WorleyTex,
-                                                           worldPos / _DetailSize + time * detail_speed, 0);
+                                                           worldPos / _DetailSize + time * detail_speed, 0).rgb;
     float low_quality_detail = low_quality_detail_rgb.r * 0.625 + low_quality_detail_rgb.g * 0.25 +
         low_quality_detail_rgb.b * 0.125;
     low_quality_detail = lerp(low_quality_detail, 1 - low_quality_detail, saturate(height_frac * 10));
@@ -428,22 +440,19 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
     // x3 keeps Light Contribution about as bright as the old beer-powder lighting.
     float3 light_contribution = lerp(light_contribution_sunset.rgb, light_contribution_day.rgb, t) * _MainLightColor.rgb * sun_up * 3.0;
     float3 ambient_color = lerp(fog_base_color_night.rgb, fog_base_color_day.rgb, sun_up);
-    float distanceTravelled = ign(id) * stepSize * 2;
-    float maxDist = distance(startPoint, endPoint);
-    if (distance(startPoint, camPoint) > viewLength) return float4(fogCol, transmittance);
-    if (distance(endPoint, camPoint) > viewLength)
-    {
-        maxDist = viewLength - distance(startPoint, camPoint);
-        float2 uv = float2((float)id.x * TextureDivide / ScreenWidth, (float)id.y * TextureDivide / ScreenHeight);
-        endPoint = calculateWorldPos(uv, viewLength, _InvVP);
-    }
-
+    float distanceTravelled = ign(id) * stepSize;
     float3 rayDir = normalize(endPoint - startPoint);
+    float startDist = distance(startPoint, camPoint);
+    if (startDist > viewLength) return float4(fogCol, transmittance);
+    // Stop where the scene depth is, so terrain in front of the clouds hides them.
+    float maxDist = min(distance(startPoint, endPoint), viewLength - startDist);
+
     float cos_theta = dot(rayDir, -_LightDirection.xyz);
     int steps = 0;
     float3 fogColor = fogCol;
 
-    while (distanceTravelled < maxDist && steps < maxSteps && transmittance > 0.0001)
+    // Stops at 1% transmittance, what is left behind that can't be seen anyway.
+    while (distanceTravelled < maxDist && steps < maxSteps && transmittance > 0.01)
     {
         float3 worldPos = startPoint + rayDir * distanceTravelled;
         distanceTravelled += stepSize;
@@ -503,20 +512,22 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
 [numthreads(8,8,1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
 {
-    if (use_temporal_upscaling) id.xy = id.xy * 4 + pixel_shuffle[pixel_offset];
-
+    // The dispatch is rounded up, so threads past the edge have nothing to do.
+    if (any(id.xy >= (uint2)cloud_size.zw)) return;
     Result[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
 
-    int x = (id.x + 0.5) * TextureDivide;
-    int y = (id.y + 0.5) * TextureDivide;
-    float2 uv = float2((float)x / ScreenWidth, (float)y / ScreenHeight);
-
+    // With temporal upscaling each thread renders one pixel of a 4x4 block, a different one every frame.
+    uint2 pixel = use_temporal_upscaling ? id.xy * 4 + pixel_shuffle[pixel_offset] : id.xy;
+    if (any(pixel >= (uint2)cloud_size.xy)) return;
+    float2 uv = (pixel + 0.5) / cloud_size.xy;
+    // Moving the jitter every frame lets the Resolve kernel average the noise away (Jimenez 2014).
+    float2 jitter_id = pixel + (frame_index % 64) * 5.588238;
 
     float depth = DepthTex.SampleLevel(sampler_DepthTex, uv, 0).r;
     float3 worldPos = calculateWorldPos(uv, depth, _InvVP);
     float3 entryPos = _CamPos.xyz;
     float3 viewDir = worldPos - entryPos;
-    float viewLength = length(viewDir) >= 4900 ? _MaxDistance : length(viewDir);
+    float viewLength = abs(depth - sky_depth) < 1e-7 ? _MaxDistance : length(viewDir);
     float3 rayDir = normalize(viewDir);
 
 
@@ -573,52 +584,102 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         float3 b0 = entryPos + rayDir * seg0.y;
         // Starts at 0, the result is premultiplied (ambient is added inside the march now).
         float4 res = raymarch(a0, b0, entryPos, float3(0, 0, 0),
-                              distance(a0, b0) / steps, steps, viewLength, 1.0, id.xy);
+                              distance(a0, b0) / steps, steps, viewLength, 1.0, jitter_id);
         if (split)
         {
             float3 a1 = entryPos + rayDir * seg1.x;
             float3 b1 = entryPos + rayDir * seg1.y;
-            res = raymarch(a1, b1, entryPos, res.rgb, distance(a1, b1) / steps, steps, viewLength, res.a, id.xy);
+            res = raymarch(a1, b1, entryPos, res.rgb, distance(a1, b1) / steps, steps, viewLength, res.a, jitter_id);
         }
-        Result[id.xy] = float4(res.rgb, 1.0 - saturate((res.a <= 0.0001 ? 0 : res.a)));
+        Result[id.xy] = float4(res.rgb, 1.0 - saturate((res.a <= 0.01 ? 0 : res.a)));
     }
 }
 
-[numthreads(8,8,1)]
-void Reproject(uint3 id : SV_DispatchThreadID)
+// Bicubic (Catmull-Rom) sample made from 9 bilinear taps. The history gets resampled every frame,
+// with plain bilinear it would slowly blur.
+float4 sample_catmull_rom(Texture2D<float4> tex, float2 uv, float2 size)
 {
-    float2 uv = float2((id.x + 0.5) * TextureDivide / ScreenWidth, (id.y + 0.5) * TextureDivide / ScreenHeight);
-    float3 p = calculateWorldPos(uv, 0.5, _InvVP);
-    float3 rayDir = normalize(p - _CamPos.xyz);
+    float2 sample_pos = uv * size;
+    float2 tex_pos1 = floor(sample_pos - 0.5) + 0.5;
+    float2 f = sample_pos - tex_pos1;
 
-    float cloudEntry = get_bounds_intersect(_CamPos.xyz, rayDir);
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
 
-    if (cloudEntry <= 0)
+    float2 tex_pos0 = (tex_pos1 - 1.0) / size;
+    float2 tex_pos3 = (tex_pos1 + 2.0) / size;
+    float2 tex_pos12 = (tex_pos1 + w2 / w12) / size;
+
+    float4 result = 0;
+    result += tex.SampleLevel(sampler_linear_clamp, float2(tex_pos0.x, tex_pos0.y), 0) * w0.x * w0.y;
+    result += tex.SampleLevel(sampler_linear_clamp, float2(tex_pos12.x, tex_pos0.y), 0) * w12.x * w0.y;
+    result += tex.SampleLevel(sampler_linear_clamp, float2(tex_pos3.x, tex_pos0.y), 0) * w3.x * w0.y;
+    result += tex.SampleLevel(sampler_linear_clamp, float2(tex_pos0.x, tex_pos12.y), 0) * w0.x * w12.y;
+    result += tex.SampleLevel(sampler_linear_clamp, float2(tex_pos12.x, tex_pos12.y), 0) * w12.x * w12.y;
+    result += tex.SampleLevel(sampler_linear_clamp, float2(tex_pos3.x, tex_pos12.y), 0) * w3.x * w12.y;
+    result += tex.SampleLevel(sampler_linear_clamp, float2(tex_pos0.x, tex_pos3.y), 0) * w0.x * w3.y;
+    result += tex.SampleLevel(sampler_linear_clamp, float2(tex_pos12.x, tex_pos3.y), 0) * w12.x * w3.y;
+    result += tex.SampleLevel(sampler_linear_clamp, float2(tex_pos3.x, tex_pos3.y), 0) * w3.x * w3.y;
+    return result;
+}
+
+// Blends this frame's raymarch into last frame's result. Smooths out the jitter noise and fills in the
+// 15 of 16 pixels that temporal upscaling didn't render this frame.
+[numthreads(8,8,1)]
+void Resolve(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= (uint2)cloud_size.xy)) return;
+
+    int2 current_max = (int2)cloud_size.zw - 1;
+    int2 current_id = min(use_temporal_upscaling ? (int2)(id.xy / 4) : (int2)id.xy, current_max);
+    bool rendered_now = !use_temporal_upscaling || all(id.xy % 4 == pixel_shuffle[pixel_offset]);
+
+    // The history gets clamped to what this frame looks like around the pixel, which stops ghosting.
+    float4 current = current_frame[current_id];
+    float4 neighbour_min = current;
+    float4 neighbour_max = current;
+    for (int y = -1; y <= 1; y++)
     {
-        Result[id.xy] = rendertexture_old[id.xy];
-        return;
+        for (int x = -1; x <= 1; x++)
+        {
+            float4 neighbour = current_frame[clamp(current_id + int2(x, y), 0, current_max)];
+            neighbour_min = min(neighbour_min, neighbour);
+            neighbour_max = max(neighbour_max, neighbour);
+        }
     }
 
-    float3 cloud_pos = _CamPos.xyz + rayDir * cloudEntry;
+    // Where were these clouds last frame? The camera moved and the wind pushed the clouds along.
+    // Inside the cloud layer the entry is 0, any distance works there as long as the camera only rotates.
+    float2 uv = (id.xy + 0.5) / cloud_size.xy;
+    float3 ray_dir = normalize(calculateWorldPos(uv, 0.5, _InvVP) - _CamPos.xyz);
+    float cloud_distance = max(get_bounds_intersect(_CamPos.xyz, ray_dir), 1000.0);
+    float3 cloud_pos = _CamPos.xyz + ray_dir * cloud_distance + wind_offset.xyz;
     float4 prev_clip = mul(prev_vp, float4(cloud_pos, 1.0));
-    float2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
+    float2 prev_uv = prev_clip.xy / prev_clip.w * 0.5 + 0.5;
+    bool on_screen = prev_clip.w > 0 && all(prev_uv >= 0) && all(prev_uv <= 1);
 
-    bool valid = prev_clip.w > 0 && all(prev_uv >= 0) && all(prev_uv <= 1);
+    float blend = rendered_now ? (use_temporal_upscaling ? 1.0 : temporal_blend) : 0.0;
+    if (!history_valid || !on_screen) blend = 1.0;
 
-    if (valid)
+    // Selected instead of lerped so garbage in a freshly created history texture can't leak through.
+    if (blend >= 1.0)
     {
-        Result[id.xy] = rendertexture_old.SampleLevel(sampler_rendertexture_old, prev_uv, 0);
+        Result[id.xy] = current;
         return;
     }
-    Result[id.xy] = rendertexture_old.SampleLevel(sampler_rendertexture_old, clamp(prev_uv, 0, 1), 0);
+    float4 history = clamp(sample_catmull_rom(rendertexture_old, prev_uv, cloud_size.xy), neighbour_min, neighbour_max);
+    Result[id.xy] = lerp(history, current, blend);
 }
 
 [numthreads(8,8,1)]
 void CloudsShadows(uint3 id : SV_DispatchThreadID)
 {
-    float2 worldXZ = _CamPos.xz + ((id.xy + 0.5) / shadow_resolution - 0.5) * shadow_world_size;
+    float2 worldXZ = shadow_center.xy + ((id.xy + 0.5) / shadow_resolution - 0.5) * shadow_world_size;
     float3 shadow_start_pos = float3(worldXZ.x, _MinBounds.y, worldXZ.y);
-    float3 rayDir = normalize(-_LightDirection);
+    float3 rayDir = normalize(-_LightDirection.xyz);
 
     float2 box_intersect = get_box_bounds(shadow_start_pos, rayDir);
 

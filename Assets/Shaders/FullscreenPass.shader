@@ -29,6 +29,8 @@ Shader "Custom/VolumetricFog"
             float4 _VolumetricsTex_TexelSize;
 
             float _ShadowWorldSize;
+            // Center of the cloud shadow map, snapped to whole texels by NoiseController.
+            float4 _CloudShadowCenter;
             static const float _ShadowStrength = 0.4;
             
             half4 frag(Varyings IN) : SV_Target
@@ -49,7 +51,7 @@ Shader "Custom/VolumetricFog"
                 if (!isSky)
                 {
                     float3 worldPos = ComputeWorldSpacePosition(IN.texcoord, depth, UNITY_MATRIX_I_VP);
-                    float2 suv = (worldPos.xz - _WorldSpaceCameraPos.xz) / _ShadowWorldSize + 0.5;
+                    float2 suv = (worldPos.xz - _CloudShadowCenter.xy) / _ShadowWorldSize + 0.5;
                     
                     if (all(suv >= 0) && all(suv <= 1))
                     {

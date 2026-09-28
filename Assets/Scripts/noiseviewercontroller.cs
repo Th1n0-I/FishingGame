@@ -54,8 +54,12 @@ public class noiseviewercontroller : MonoBehaviour {
 					newTex = null;
 					break;
 			}
+			if (!newTex) {
+				image.material = null;
+				image.texture  = null;
+				return;
+			}
 			Debug.Log(newTex.width + " " + newTex.dimension);
-			if (!newTex) return;
 			if (newTex.dimension == TextureDimension.Tex3D) {
 				image.material = sliceMat;
 				sliceMat.SetTexture("_Volume", newTex);

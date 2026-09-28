@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using GrayWolf.GPUInstancing.Domain;
 using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.InputSystem;
 using UnityEngine.Rendering;
 using UnityEngine.Serialization;
 using UnityEngine.UI;
@@ -35,6 +36,11 @@ class CloudType {
 	}
 
 	public void MakeCurvesDirty() => curvesDirty = true;
+
+	public void Release() {
+		if (shapeLut) UnityEngine.Object.Destroy(shapeLut);
+		if (densityLut) UnityEngine.Object.Destroy(densityLut);
+	}
 
 	public void SetValues(ComputeShader cs) {
 		if (curvesDirty) {
@@ -100,6 +106,8 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField] private bool  firstPass;
 	[SerializeField] private bool  useStepSize;
 	[SerializeField] private bool  temporalUpscaling;
+	[SerializeField, Range(0.02f, 1), Tooltip("How much of the new frame goes into the result. Lower is smoother but reacts slower, 1 turns temporal accumulation off.")]
+	private float temporalBlend = 0.1f;
 
 	[Header("-Settings")]
 	[SerializeField] private float coverage;
@@ -193,8 +201,6 @@ public class NoiseController : MonoBehaviour {
 
 	[SerializeField] private RenderTexture perlinRenderTexture,
 	                                       worleyRenderTexture,
-	                                       volumetricsRT_A,
-	                                       volumetricsRT_B,
 	                                       weatherRenderTexture,
 	                                       shadowRT;
 	private Light sun;
@@ -203,8 +209,18 @@ public class NoiseController : MonoBehaviour {
 
 	private Matrix4x4 oldProjectionMatrix;
 
-	private bool          firstFrame = true, useVRTA = true, curvesDirty = true;
+	private bool          firstFrame = true, curvesDirty = true;
 	private ComputeBuffer minMaxValues;
+
+	// This frame's raymarch (a quarter of the size with temporal upscaling) and two resolved textures that swap every frame.
+	private readonly RenderTexture[] historyRTs = new RenderTexture[2];
+	private          RenderTexture   currentRT;
+	private          int             historyIndex, frameIndex;
+	private          bool            historyValid, temporalEnabled = true;
+	private          float           toggleMessageUntil;
+
+	// Kernel order in VolumetricCompute.compute.
+	private const int KernelMain = 0, KernelResolve = 1, KernelShadows = 2;
 
 
 	#region Caches
@@ -213,9 +229,6 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int WorleyTex                   = Shader.PropertyToID("WorleyTex");
 	private static readonly int WorleyTex1                  = Shader.PropertyToID("_WorleyTex");
 	private static readonly int PerlinTex1                  = Shader.PropertyToID("_PerlinTex");
-	private static readonly int TextureDivide               = Shader.PropertyToID("TextureDivide");
-	private static readonly int ScreenWidth                 = Shader.PropertyToID("ScreenWidth");
-	private static readonly int ScreenHeight                = Shader.PropertyToID("ScreenHeight");
 	private static readonly int Result                      = Shader.PropertyToID("Result");
 	private static readonly int DepthTex                    = Shader.PropertyToID("DepthTex");
 	private static readonly int VolumetricsTex              = Shader.PropertyToID("_VolumetricsTex");
@@ -315,6 +328,15 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int PowderStrength              = Shader.PropertyToID("powder_strength");
 	private static readonly int HorizonFade                 = Shader.PropertyToID("horizon_fade");
 	private static readonly int WindShear                   = Shader.PropertyToID("wind_shear");
+	private static readonly int CurrentFrame                = Shader.PropertyToID("current_frame");
+	private static readonly int CloudSize                   = Shader.PropertyToID("cloud_size");
+	private static readonly int FrameIndex                  = Shader.PropertyToID("frame_index");
+	private static readonly int HistoryValid                = Shader.PropertyToID("history_valid");
+	private static readonly int TemporalBlend               = Shader.PropertyToID("temporal_blend");
+	private static readonly int WindOffset                  = Shader.PropertyToID("wind_offset");
+	private static readonly int ShadowCenter                = Shader.PropertyToID("shadow_center");
+	private static readonly int CloudShadowCenter           = Shader.PropertyToID("_CloudShadowCenter");
+	private static readonly int SkyDepth                    = Shader.PropertyToID("sky_depth");
 
 	#endregion
 
@@ -346,10 +368,41 @@ public class NoiseController : MonoBehaviour {
 	}
 
 	private void Update() {
+		CheckToggleKeys();
+
 		if (!regenerateNoise && !constantlyGenerateNoise) return;
 		DispatchWeather();
 		DispatchNoise();
 		regenerateNoise = false;
+	}
+
+	private void OnDestroy() {
+		ReleaseCloudTextures();
+		foreach (var rt in new[] { perlinRenderTexture, worleyRenderTexture, weatherRenderTexture, shadowRT }) DestroyTexture(rt);
+		if (cloudTypes != null) foreach (var v in cloudTypes) v?.Release();
+		if (CumulusLut) Destroy(CumulusLut);
+		minMaxValues?.Release();
+	}
+
+	// T and U toggle the temporal features in a build, so they can be compared without the editor.
+	private void CheckToggleKeys() {
+		var keyboard = Keyboard.current;
+		if (keyboard == null) return;
+
+		if (keyboard.tKey.wasPressedThisFrame) {
+			temporalEnabled = !temporalEnabled;
+			toggleMessageUntil = UnityEngine.Time.unscaledTime + 3;
+		}
+		if (keyboard.uKey.wasPressedThisFrame) {
+			temporalUpscaling = !temporalUpscaling;
+			toggleMessageUntil = UnityEngine.Time.unscaledTime + 3;
+		}
+	}
+
+	private void OnGUI() {
+		if (UnityEngine.Time.unscaledTime > toggleMessageUntil) return;
+		GUI.Label(new Rect(10, Screen.height - 30, 800, 25),
+		          $"[T] Temporal accumulation: {(temporalEnabled ? "on" : "off")}    [U] Temporal upscaling: {(temporalUpscaling ? "on" : "off")}");
 	}
 
 
@@ -426,38 +479,66 @@ public class NoiseController : MonoBehaviour {
 	private void InitializeVolumetrics() {
 		sun = RenderSettings.sun;
 
-		volumetricsShader.SetInt(TextureDivide, textureDivide);
-		volumetricsShader.SetInt(ScreenWidth,   Screen.width);
-		volumetricsShader.SetInt(ScreenHeight,  Screen.height);
-
-		CreateVolumetricTexture();
+		CreateShadowTexture();
 		CreateCurveLuts();
 
-		volumetricsShader.SetTexture(0, WeatherMap, weatherRenderTexture);
-		volumetricsShader.SetTexture(0, PerlinTex1, perlinRenderTexture);
-		volumetricsShader.SetTexture(0, WorleyTex1, worleyRenderTexture);
-		volumetricsShader.SetTexture(0, Lut,        CumulusLut);
-		volumetricsShader.SetTexture(2, WeatherMap, weatherRenderTexture);
-		volumetricsShader.SetTexture(2, PerlinTex1, perlinRenderTexture);
-		volumetricsShader.SetTexture(2, WorleyTex1, worleyRenderTexture);
-		volumetricsShader.SetTexture(2, Lut,        CumulusLut);
+		volumetricsShader.SetTexture(KernelMain,    WeatherMap, weatherRenderTexture);
+		volumetricsShader.SetTexture(KernelMain,    PerlinTex1, perlinRenderTexture);
+		volumetricsShader.SetTexture(KernelMain,    WorleyTex1, worleyRenderTexture);
+		volumetricsShader.SetTexture(KernelMain,    Lut,        CumulusLut);
+		volumetricsShader.SetTexture(KernelShadows, WeatherMap, weatherRenderTexture);
+		volumetricsShader.SetTexture(KernelShadows, PerlinTex1, perlinRenderTexture);
+		volumetricsShader.SetTexture(KernelShadows, WorleyTex1, worleyRenderTexture);
+		volumetricsShader.SetTexture(KernelShadows, Lut,        CumulusLut);
 	}
 
-	private void CreateVolumetricTexture() {
-		volumetricsRT_A = new RenderTexture(Screen.width / textureDivide, Screen.height / textureDivide, 0,
-		                                    RenderTextureFormat.ARGBFloat);
-		volumetricsRT_A.enableRandomWrite = true;
-		volumetricsRT_A.wrapMode          = TextureWrapMode.Repeat;
-		volumetricsRT_A.filterMode        = FilterMode.Bilinear;
-		volumetricsRT_A.Create();
+	// (Re)creates the cloud textures whenever the resolution or the temporal upscaling setting changes.
+	private void EnsureCloudTextures(int screenWidth, int screenHeight) {
+		int divide        = Mathf.Max(1, textureDivide);
+		int width         = Mathf.Max(1, screenWidth  / divide);
+		int height        = Mathf.Max(1, screenHeight / divide);
+		int currentWidth  = temporalUpscaling ? (width  + 3) / 4 : width;
+		int currentHeight = temporalUpscaling ? (height + 3) / 4 : height;
 
-		volumetricsRT_B = new RenderTexture(Screen.width / textureDivide, Screen.height / textureDivide, 0,
-		                                    RenderTextureFormat.ARGBFloat);
-		volumetricsRT_B.enableRandomWrite = true;
-		volumetricsRT_B.wrapMode          = TextureWrapMode.Repeat;
-		volumetricsRT_B.filterMode        = FilterMode.Bilinear;
-		volumetricsRT_B.Create();
+		if (currentRT && currentRT.width == currentWidth && currentRT.height == currentHeight &&
+		    historyRTs[0] && historyRTs[0].width == width && historyRTs[0].height == height) return;
 
+		ReleaseCloudTextures();
+		currentRT     = CreateCloudTexture(currentWidth, currentHeight);
+		historyRTs[0] = CreateCloudTexture(width, height);
+		historyRTs[1] = CreateCloudTexture(width, height);
+		historyValid  = false;
+	}
+
+	private static RenderTexture CreateCloudTexture(int width, int height) {
+		// Half precision is plenty for cloud colours and halves the memory traffic of ARGBFloat.
+		var rt = new RenderTexture(width, height, 0, RenderTextureFormat.ARGBHalf) {
+			enableRandomWrite = true,
+			// Clamp, with Repeat the bilinear upsampling pulled in clouds from the opposite screen edge.
+			wrapMode   = TextureWrapMode.Clamp,
+			filterMode = FilterMode.Bilinear,
+		};
+		rt.Create();
+		return rt;
+	}
+
+	private void ReleaseCloudTextures() {
+		DestroyTexture(currentRT);
+		DestroyTexture(historyRTs[0]);
+		DestroyTexture(historyRTs[1]);
+		currentRT     = null;
+		historyRTs[0] = historyRTs[1] = null;
+	}
+
+	private static void DestroyTexture(RenderTexture rt) {
+		if (!rt) return;
+		rt.Release();
+		Destroy(rt);
+	}
+
+	private static int ThreadGroups(int size) => (size + 7) / 8;
+
+	private void CreateShadowTexture() {
 		shadowRT = new RenderTexture(128, 128, 0, RenderTextureFormat.RHalf);
 
 		shadowRT.enableRandomWrite = true;
@@ -482,13 +563,36 @@ public class NoiseController : MonoBehaviour {
 		var depthTex = PersistentDepthFeature.PersistentDepthTexture;
 
 		if (depthTex != null && depthTex.rt && cam) {
-			volumetricsShader.SetTexture(0, DepthTex,         depthTex.rt);
-			volumetricsShader.SetTexture(0, Result,           useVRTA ? volumetricsRT_A : volumetricsRT_B);
-			volumetricsShader.SetTexture(0, RendertextureOld, !useVRTA ? volumetricsRT_A : volumetricsRT_B);
-			volumetricsShader.SetTexture(1, Result,           useVRTA ? volumetricsRT_A : volumetricsRT_B);
-			volumetricsShader.SetTexture(1, RendertextureOld, !useVRTA ? volumetricsRT_A : volumetricsRT_B);
+			// The depth texture has the real render resolution, so resizing the window just works.
+			EnsureCloudTextures(depthTex.rt.width, depthTex.rt.height);
+			var historyRead  = historyRTs[historyIndex];
+			var historyWrite = historyRTs[1 - historyIndex];
 
-			volumetricsShader.SetTexture(2, ShadowRT, shadowRT);
+			volumetricsShader.SetTexture(KernelMain,    DepthTex,         depthTex.rt);
+			volumetricsShader.SetTexture(KernelMain,    Result,           currentRT);
+			volumetricsShader.SetTexture(KernelResolve, CurrentFrame,     currentRT);
+			volumetricsShader.SetTexture(KernelResolve, RendertextureOld, historyRead);
+			volumetricsShader.SetTexture(KernelResolve, Result,           historyWrite);
+			volumetricsShader.SetTexture(KernelShadows, ShadowRT,         shadowRT);
+			volumetricsShader.SetVector(CloudSize, new Vector4(historyWrite.width, historyWrite.height, currentRT.width, currentRT.height));
+
+			// The jitter only moves when something averages it, otherwise it would crawl.
+			float blend = temporalEnabled ? temporalBlend : 1.0f;
+			frameIndex++;
+			volumetricsShader.SetInt(FrameIndex, blend < 1.0f || temporalUpscaling ? frameIndex : 0);
+			volumetricsShader.SetFloat(TemporalBlend, blend);
+			volumetricsShader.SetBool(HistoryValid, historyValid);
+			// The base noise scrolls by baseSpeed noise tiles per second towards -x, so last frame the clouds were further along +x.
+			volumetricsShader.SetVector(WindOffset, new Vector4(baseSpeed * noiseSize * UnityEngine.Time.deltaTime, 0, 0, 0));
+			volumetricsShader.SetFloat(SkyDepth, SystemInfo.usesReversedZBuffer ? 0.0f : 1.0f);
+
+			// Snapped to whole texels so the ground shadows don't shimmer while the camera moves.
+			float shadowTexel  = shadowWorldSize / shadowRT.width;
+			var   camPosition  = cam.transform.position;
+			var   shadowCenter = new Vector4(Mathf.Floor(camPosition.x / shadowTexel) * shadowTexel,
+			                                 Mathf.Floor(camPosition.z / shadowTexel) * shadowTexel, 0, 0);
+			volumetricsShader.SetVector(ShadowCenter, shadowCenter);
+			Shader.SetGlobalVector(CloudShadowCenter, shadowCenter);
 
 			volumetricsShader.SetVector(CamPos,
 			                            new Vector4(cam.transform.position.x, cam.transform.position.y,
@@ -572,16 +676,17 @@ public class NoiseController : MonoBehaviour {
 
 			foreach (var v in cloudTypes) v.SetValues(volumetricsShader);
 
-			volumetricsShader.Dispatch(1, volumetricsRT_A.width / 8, volumetricsRT_A.height / 8, 1);
-			volumetricsShader.Dispatch(0, volumetricsRT_A.width / 8 / (temporalUpscaling ? 4 : 1),
-			                           volumetricsRT_A.height   / 8 / (temporalUpscaling ? 4 : 1), 1);
-			volumetricsShader.Dispatch(2, shadowRT.width / 8, shadowRT.height / 8, 1);
+			// Rounded up, the kernels skip the threads that fall outside the textures.
+			volumetricsShader.Dispatch(KernelMain,    ThreadGroups(currentRT.width),    ThreadGroups(currentRT.height),    1);
+			volumetricsShader.Dispatch(KernelResolve, ThreadGroups(historyWrite.width), ThreadGroups(historyWrite.height), 1);
+			volumetricsShader.Dispatch(KernelShadows, ThreadGroups(shadowRT.width),     ThreadGroups(shadowRT.height),     1);
 
 			oldProjectionMatrix = vp;
 
-			Shader.SetGlobalTexture(VolumetricsTex, useVRTA ? volumetricsRT_A : volumetricsRT_B);
+			Shader.SetGlobalTexture(VolumetricsTex, historyWrite);
 
-			useVRTA = !useVRTA;
+			historyIndex = 1 - historyIndex;
+			historyValid = true;
 		}
 	}
 
