@@ -145,6 +145,18 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField] private Collider  bounds;
 	[SerializeField] private Transform sphereCenter;
 
+	[Header("-Lighting")]
+	[SerializeField, Range(-0.9f, 0), Tooltip("How strongly the second phase lobe scatters light backwards.")]
+	private float backScattering = -0.3f;
+	[SerializeField, Range(0, 1), Tooltip("Blend between the forward lobe (Light Scattering) and the back lobe.")]
+	private float backScatteringWeight = 0.25f;
+	[SerializeField, Range(0, 1), Tooltip("Ambient light at the bottom of the clouds compared to the top.")]
+	private float ambientBottom = 0.4f;
+	[SerializeField, Range(0, 1), Tooltip("Darkens cloud edges when the sun is behind the camera.")]
+	private float powderStrength = 0.5f;
+	[SerializeField, Tooltip("Distance in meters where the clouds have faded to ~37%.")]
+	private float horizonFade = 60000f;
+
 	[Header("Cloud Types")]
 	[SerializeField] private CloudType stratus;
 	[SerializeField] private CloudType   stratocumulus;
@@ -295,6 +307,11 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int PWorley3GainGlobal          = Shader.PropertyToID("p_worley_3_gain_global");
 	private static readonly int PWorley3OctavesGlobal       = Shader.PropertyToID("p_worley_3_octaves_global");
 	private static readonly int WeatherSpeed                = Shader.PropertyToID("weather_speed");
+	private static readonly int BackScattering              = Shader.PropertyToID("back_scattering");
+	private static readonly int BackScatteringWeight        = Shader.PropertyToID("back_scattering_weight");
+	private static readonly int AmbientBottom               = Shader.PropertyToID("ambient_bottom");
+	private static readonly int PowderStrength              = Shader.PropertyToID("powder_strength");
+	private static readonly int HorizonFade                 = Shader.PropertyToID("horizon_fade");
 
 	#endregion
 
@@ -480,7 +497,7 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetVector(LightContribution,       lightContribution);
 			volumetricsShader.SetVector(LightContributionSunset, lightContributionSunset);
 
-			volumetricsShader.SetVector(MainLightColor, sun.color);
+			volumetricsShader.SetVector(MainLightColor, sun.color.linear);
 			volumetricsShader.SetVector(LightDirection, sun.transform.forward);
 
 			volumetricsShader.SetVector(MinBounds, bounds.bounds.min);
@@ -517,6 +534,11 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(WeatherSpeed, weatherSpeed);
 			volumetricsShader.SetFloat(ShadowStepSize,    shadowStepSize);
 			volumetricsShader.SetFloat(ShadowConeSpread,  shadowConeSpread);
+			volumetricsShader.SetFloat(BackScattering,    backScattering);
+			volumetricsShader.SetFloat(BackScatteringWeight, backScatteringWeight);
+			volumetricsShader.SetFloat(AmbientBottom,     ambientBottom);
+			volumetricsShader.SetFloat(PowderStrength,    powderStrength);
+			volumetricsShader.SetFloat(HorizonFade,       horizonFade);
 			volumetricsShader.SetFloat(Coverage,          coverage);
 			volumetricsShader.SetInt(CurrentCloudType, currentType);
 			volumetricsShader.SetFloat(ShadowResolution1, shadowRT.width);

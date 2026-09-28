@@ -70,6 +70,14 @@ int current_cloud_type;
 float shadow_resolution;
 float shadow_world_size;
 int shadow_steps;
+float back_scattering;
+float back_scattering_weight;
+float ambient_bottom;
+float powder_strength;
+float horizon_fade;
+
+// Height fraction of the last get_density() call, used for the ambient gradient.
+static float last_height_frac;
 
 int _StepAmount;
 
@@ -174,6 +182,12 @@ float henyey_greenstein_old(float g, float costh)
 float henyey_greenstein(float g, float costh)
 {
     return ((1.0 - g * g) / pow(1 + g * g - 2.0 * g * costh, 1.5f)) / (4 * PI);
+}
+
+// Forward lobe gives the silver lining, back lobe keeps clouds lit when the sun is behind you.
+float dual_lobe_phase(float g_forward, float g_back, float costh)
+{
+    return lerp(henyey_greenstein(g_forward, costh), henyey_greenstein(g_back, costh), back_scattering_weight);
 }
 
 float remap(float v, float inMin, float inMax, float outMin, float outMax)
@@ -304,7 +318,7 @@ float get_density(float3 worldPos, bool lowDetail = false)
         densityGradient = gradient_lerp(stratocumulus_density_lut, sampler_stratocumulus_density_lut,
                                         cumulus_density_lut, sampler_cumulus_density_lut, float2(height_frac, 0.5), t);
     }
-
+    last_height_frac = height_frac;
 
     if ((1 - coverage) + weather.r >= 1.0) return 0;
 
@@ -408,7 +422,10 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
 {
     float sun_elevation = -_LightDirection.y;
     float t = smoothstep(0.0, 0.25, sun_elevation);
-    float3 light_contribution = lerp(light_contribution_sunset.rgb, light_contribution_day.rgb, t);
+    float sun_up = smoothstep(-0.1, 0.05, sun_elevation);
+    // x3 keeps Light Contribution about as bright as the old beer-powder lighting.
+    float3 light_contribution = lerp(light_contribution_sunset.rgb, light_contribution_day.rgb, t) * _MainLightColor.rgb * sun_up * 3.0;
+    float3 ambient_color = lerp(fog_base_color_night.rgb, fog_base_color_day.rgb, sun_up);
     float distanceTravelled = ign(id) * stepSize * 2;
     float maxDist = distance(startPoint, endPoint);
     if (distance(startPoint, camPoint) > viewLength) return float4(fogCol, transmittance);
@@ -420,6 +437,7 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
     }
 
     float3 rayDir = normalize(endPoint - startPoint);
+    float cos_theta = dot(rayDir, -_LightDirection.xyz);
     int steps = 0;
     float3 fogColor = fogCol;
 
@@ -430,9 +448,10 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
         steps++;
         float density = get_density(worldPos);
         if (density <= 0) continue;
+        float height_frac = saturate(last_height_frac);
         float3 shadowRayDir = normalize(-_LightDirection.xyz);
-        float3 shadowRayEntryPos = worldPos + ign(id.xy) * shadow_step_size;
-        float shadowTransmittance = 1;
+        float3 shadowRayEntryPos = worldPos + shadowRayDir * ign(id.xy) * shadow_step_size;
+        float shadow_od = 0;
         float shadow_distance_travelled = 0;
         float3 right = normalize(cross(shadowRayDir, float3(0, 1, 0)));
         float3 up = normalize(cross(shadowRayDir, right));
@@ -452,21 +471,29 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
             float shadowDensity;
             if (i < 6) shadowDensity = get_density(shadowRayPos) * step_size;
             else shadowDensity = get_density(shadowRayPos, true) * step_size;
-            if (shadowDensity > 0)
-            {
-                shadowTransmittance *= exp(-shadowDensity);
-            }
+            shadow_od += shadowDensity;
         }
 
-        float d = density * stepSize;
-        float beer = exp(-d);
-        float beer_powder = exp(-d) * (1 - exp(-2 * d));
-        //fogColor.rgb += transmittance * _MainLightColor.rgb * _LightContribution.rgb * HenyeyGreenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) * density * shadowTransmittance * stepSize;
-        //fogColor.rgb += transmittance * _MainLightColor.rgb * max(0.9 * henyey_greenstein(_LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))), 0.1 * henyey_greenstein(-0.3,dot(rayDir, -normalize(_LightDirection.xyz)))) * shadowTransmittance * light_contribution * beer_powder * smoothstep(-0.1, 0.05, sun_elevation); 
-        float light_energy = exp(-d) * (1 - exp(-2 * d)) * 2 * henyey_greenstein(
-            _LightScattering, dot(rayDir, -normalize(_LightDirection.xyz))) * shadowTransmittance;
-        fogColor.rgb += transmittance * light_contribution_day.rgb * light_energy;
-        transmittance *= beer;
+        // Multiple scattering (Wrenninge 2013): every octave goes deeper, scatters less and more evenly.
+        float sun_light = 0;
+        float extinction = 1, scattering = 1, eccentricity = 1;
+        for (int o = 0; o < 3; o++)
+        {
+            sun_light += scattering * exp(-shadow_od * extinction) *
+                dual_lobe_phase(_LightScattering * eccentricity, back_scattering * eccentricity, cos_theta);
+            extinction *= 0.5;
+            scattering *= 0.5;
+            eccentricity *= 0.5;
+        }
+        // Powder darkens edges when the sun is behind you, fades out when looking towards the sun.
+        float powder = lerp(1.0, 1.0 - exp(-2.0 * shadow_od), powder_strength * saturate(0.5 - 0.5 * cos_theta));
+        float3 ambient = ambient_color * lerp(ambient_bottom, 1.0, height_frac);
+        // Fade far samples out so the horizon turns into haze instead of noise.
+        float fade = exp(-distance(worldPos, camPoint) / max(horizon_fade, 1.0));
+        float step_opacity = (1.0 - exp(-density * stepSize)) * fade;
+        // Energy conserving integration (Hillaire 2015), looks the same no matter the step size.
+        fogColor.rgb += transmittance * step_opacity * (light_contribution * sun_light * powder + ambient);
+        transmittance *= 1.0 - step_opacity;
     }
     return float4(fogColor.rgb, transmittance);
 }
@@ -539,11 +566,11 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             }
         }
 
-        float t = smoothstep(-0.1, 0.05, -_LightDirection.y);
         float steps = split ? _StepAmount * 0.5 : _StepAmount;
         float3 a0 = entryPos + rayDir * seg0.x;
         float3 b0 = entryPos + rayDir * seg0.y;
-        float4 res = raymarch(a0, b0, entryPos, lerp(fog_base_color_night.rgb, fog_base_color_day.rgb, t),
+        // Starts at 0, the result is premultiplied (ambient is added inside the march now).
+        float4 res = raymarch(a0, b0, entryPos, float3(0, 0, 0),
                               distance(a0, b0) / steps, steps, viewLength, 1.0, id.xy);
         if (split)
         {

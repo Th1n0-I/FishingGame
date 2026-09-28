@@ -54,11 +54,14 @@ Shader "Custom/VolumetricFog"
                     if (all(suv >= 0) && all(suv <= 1))
                     {
                         float shadow = SAMPLE_TEXTURE2D(shadowRT, sampler_LinearClamp, suv).r;
-                        color.rgb *= lerp(_ShadowStrength, 1.0, shadow);
+                        // Fade the shadows out near the edge of the shadow map instead of a hard square cutoff.
+                        float edge = saturate(min(min(suv.x, suv.y), min(1.0 - suv.x, 1.0 - suv.y)) * 10.0);
+                        color.rgb *= lerp(1.0, lerp(_ShadowStrength, 1.0, shadow), edge);
                     }
                 }
-                
-                return lerp(color, float4(fogData.rgb ,1.0), saturate(fogData.a));
+
+                // The clouds are premultiplied, so only the scene behind them gets dimmed.
+                return float4(color.rgb * (1.0 - saturate(fogData.a)) + fogData.rgb, lerp(color.a, 1.0, saturate(fogData.a)));
                 
             }
             ENDHLSL
