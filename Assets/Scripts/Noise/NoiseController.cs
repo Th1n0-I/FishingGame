@@ -95,6 +95,15 @@ class NoiseParams {
 }
 
 public class NoiseController : MonoBehaviour {
+	// Starts at 0 so scenes that saved the old bool (false) load as Off.
+	private enum UpscaleMode { Off, TwoByTwo, FourByFour }
+
+	private int UpscaleFactor => temporalUpscaling switch {
+		UpscaleMode.TwoByTwo   => 2,
+		UpscaleMode.FourByFour => 4,
+		_                      => 1
+	};
+
 	[Header("Volumetrics")]
 	[Header("-Quality")]
 	[SerializeField]
@@ -105,7 +114,8 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField] private float maxDist             = 100;
 	[SerializeField] private bool  firstPass;
 	[SerializeField] private bool  useStepSize;
-	[SerializeField] private bool  temporalUpscaling;
+	[SerializeField, Tooltip("Renders 1 of every 4 (2x2) or 16 (4x4) pixels per frame and builds the rest up over time. 2x2 copes a lot better with fast clouds.")]
+	private UpscaleMode temporalUpscaling = UpscaleMode.Off;
 	[SerializeField, Range(0.02f, 1), Tooltip("How much of the new frame goes into the result. Lower is smoother but reacts slower, 1 turns temporal accumulation off.")]
 	private float temporalBlend = 0.1f;
 
@@ -284,7 +294,7 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int LightContributionSunset     = Shader.PropertyToID("light_contribution_sunset");
 	private static readonly int FogBaseColorNight           = Shader.PropertyToID("fog_base_color_night");
 	private static readonly int PixelOffset                 = Shader.PropertyToID("pixel_offset");
-	private static readonly int UseTemporalUpscaling        = Shader.PropertyToID("use_temporal_upscaling");
+	private static readonly int UpscaleFactorID             = Shader.PropertyToID("upscale_factor");
 	private static readonly int Coverage                    = Shader.PropertyToID("coverage");
 	private static readonly int CloudTypeStratus            = Shader.PropertyToID("cloud_type_stratus");
 	private static readonly int CloudTypeCumulus            = Shader.PropertyToID("cloud_type_cumulus");
@@ -396,7 +406,7 @@ public class NoiseController : MonoBehaviour {
 			toggleMessageUntil = UnityEngine.Time.unscaledTime + 3;
 		}
 		if (keyboard.uKey.wasPressedThisFrame) {
-			temporalUpscaling = !temporalUpscaling;
+			temporalUpscaling = (UpscaleMode)(((int)temporalUpscaling + 1) % 3);
 			toggleMessageUntil = UnityEngine.Time.unscaledTime + 3;
 		}
 	}
@@ -404,7 +414,7 @@ public class NoiseController : MonoBehaviour {
 	private void OnGUI() {
 		if (UnityEngine.Time.unscaledTime > toggleMessageUntil) return;
 		GUI.Label(new Rect(10, Screen.height - 30, 800, 25),
-		          $"[T] Temporal accumulation: {(temporalEnabled ? "on" : "off")}    [U] Temporal upscaling: {(temporalUpscaling ? "on" : "off")}");
+		          $"[T] Temporal accumulation: {(temporalEnabled ? "on" : "off")}    [U] Temporal upscaling: {(UpscaleFactor > 1 ? UpscaleFactor + "x" + UpscaleFactor : "off")}");
 	}
 
 
@@ -499,8 +509,9 @@ public class NoiseController : MonoBehaviour {
 		int divide        = Mathf.Max(1, textureDivide);
 		int width         = Mathf.Max(1, screenWidth  / divide);
 		int height        = Mathf.Max(1, screenHeight / divide);
-		int currentWidth  = temporalUpscaling ? (width  + 3) / 4 : width;
-		int currentHeight = temporalUpscaling ? (height + 3) / 4 : height;
+		int factor        = UpscaleFactor;
+		int currentWidth  = (width  + factor - 1) / factor;
+		int currentHeight = (height + factor - 1) / factor;
 
 		if (currentRT && currentRT.width == currentWidth && currentRT.height == currentHeight && currentDepthRT &&
 		    historyRTs[0] && historyRTs[0].width == width && historyRTs[0].height == height) return;
@@ -588,7 +599,7 @@ public class NoiseController : MonoBehaviour {
 			// The jitter only moves when something averages it, otherwise it would crawl.
 			float blend = temporalEnabled ? temporalBlend : 1.0f;
 			frameIndex++;
-			volumetricsShader.SetInt(FrameIndex, blend < 1.0f || temporalUpscaling ? frameIndex : 0);
+			volumetricsShader.SetInt(FrameIndex, blend < 1.0f || UpscaleFactor > 1 ? frameIndex : 0);
 			volumetricsShader.SetFloat(TemporalBlend, blend);
 			volumetricsShader.SetBool(HistoryValid, historyValid);
 			// The base noise scrolls by baseSpeed noise tiles per second towards -x, so last frame the clouds were further along +x.
@@ -669,7 +680,7 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetBool(UseStepSize,          useStepSize);
 			volumetricsShader.SetBool(UseBoundingSphere,    useBoundingSphere);
 			volumetricsShader.SetBool(CombineBounds,        combineBounds);
-			volumetricsShader.SetBool(UseTemporalUpscaling, temporalUpscaling);
+			volumetricsShader.SetInt(UpscaleFactorID, UpscaleFactor);
 
 			var proj = GL.GetGPUProjectionMatrix(cam.projectionMatrix, true);
 			var view = cam.worldToCameraMatrix;
