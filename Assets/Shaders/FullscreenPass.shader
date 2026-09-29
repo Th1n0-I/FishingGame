@@ -50,6 +50,61 @@ Shader "Custom/VolumetricFog"
             // xy: how far the wind has carried the clouds (xz), zw: wind near the ground in m/s (xz).
             float4 _CloudWind;
 
+            // Lightning, set by NoiseController. xyz: where the flash is, w: its brightness right now.
+            float4 _LightningFlash;
+            // The bolt from the cloud base to the ground in world space, x of the info: number of points (0 = no bolt).
+            float4 _LightningBolt[33];
+            float4 _LightningBoltInfo;
+
+            // Clip space position of a bolt point, flipped the same way ComputeWorldSpacePosition reads IN.texcoord.
+            float4 bolt_clip(float3 position)
+            {
+                float4 clip = mul(UNITY_MATRIX_VP, float4(position, 1.0));
+                #if UNITY_UV_STARTS_AT_TOP
+                    clip.y = -clip.y;
+                #endif
+                return clip;
+            }
+
+            float2 bolt_pixel(float4 clip)
+            {
+                return (clip.xy / max(abs(clip.w), 1e-5) * 0.5 + 0.5) * _ScreenParams.xy;
+            }
+
+            // How bright the bolt is in this pixel: a thin core and a soft glow around the line. Hidden where the
+            // scene is closer than the bolt.
+            float lightning_bolt(float2 pixel, float scene_distance)
+            {
+                int count = (int)_LightningBoltInfo.x;
+                float best = 1e9;
+                float best_distance = 0.0;
+                float4 clip_a = bolt_clip(_LightningBolt[0].xyz);
+                float2 a = bolt_pixel(clip_a);
+                for (int i = 1; i < 33; i++)
+                {
+                    if (i >= count) break;
+                    float4 clip_b = bolt_clip(_LightningBolt[i].xyz);
+                    float2 b = bolt_pixel(clip_b);
+                    // Skip segments that reach behind the camera.
+                    if (clip_a.w > 0 && clip_b.w > 0)
+                    {
+                        float2 ab = b - a;
+                        float along = saturate(dot(pixel - a, ab) / max(dot(ab, ab), 1e-4));
+                        float d = length(pixel - (a + ab * along));
+                        if (d < best)
+                        {
+                            best = d;
+                            best_distance = lerp(length(_LightningBolt[i - 1].xyz - _WorldSpaceCameraPos),
+                                                 length(_LightningBolt[i].xyz - _WorldSpaceCameraPos), along);
+                        }
+                    }
+                    clip_a = clip_b;
+                    a = b;
+                }
+                if (best_distance > scene_distance) return 0.0;
+                return exp(-best * best / 2.0) + 0.25 * exp(-best * best / 150.0);
+            }
+
             float rain_hash(float2 p)
             {
                 p = frac(p * float2(0.1031, 0.1030));
@@ -141,7 +196,32 @@ Shader "Custom/VolumetricFog"
                 }
 
                 // The clouds are premultiplied, so only the scene behind them gets dimmed.
-                float3 result = color.rgb * (1.0 - saturate(fogData.a)) + fogData.rgb;
+                float cloudAlpha = saturate(fogData.a);
+                float3 result = color.rgb * (1.0 - cloudAlpha) + fogData.rgb;
+
+                // Lightning: the flash lights up the clouds around it from inside, a bit of the whole scene, and the bolt.
+                if (_LightningFlash.w > 0)
+                {
+                    float3 flashColor = float3(0.8, 0.86, 1.0);
+                    float3 toPixel = ComputeWorldSpacePosition(IN.texcoord, depth, UNITY_MATRIX_I_VP) - _WorldSpaceCameraPos;
+                    float sceneDistance = isSky ? 1e9 : length(toPixel);
+                    float3 ray = normalize(toPixel);
+                    float3 toFlash = _LightningFlash.xyz - _WorldSpaceCameraPos;
+                    float flashDistance = max(length(toFlash), 1.0);
+                    // About a 4 km glow inside the cloud, plus a wide faint one.
+                    float spread = 4000.0 / flashDistance;
+                    float offAxis = (1.0 - dot(ray, toFlash / flashDistance)) * 2.0;
+                    float glow = exp(-offAxis / (spread * spread)) * 3.0 + exp(-offAxis / (16.0 * spread * spread)) * 0.4;
+                    result += flashColor * (_LightningFlash.w * cloudAlpha * glow);
+                    result += flashColor * (_LightningFlash.w * 0.08 * saturate(20000.0 / flashDistance));
+                    if (_LightningBoltInfo.x > 1)
+                    {
+                        // From below the clouds the bolt is in front of them, from above they hide it.
+                        float bolt = lightning_bolt(IN.texcoord * _ScreenParams.xy, sceneDistance);
+                        bolt *= _WorldSpaceCameraPos.y < _CloudRainInfo.x ? 1.0 : 1.0 - cloudAlpha;
+                        result += flashColor * (bolt * _LightningBoltInfo.y * 6.0);
+                    }
+                }
 
                 // Rain in front of everything, where it rains above the camera and only below the cloud base.
                 if (_CloudRain.x > 0)

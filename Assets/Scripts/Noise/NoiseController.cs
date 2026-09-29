@@ -286,6 +286,17 @@ public class NoiseController : MonoBehaviour {
 	private float   detailRise;
 
 	private Texture2D stormMap;
+	// The storm cells in cell units of the storm map, for putting lightning where the storms are.
+	private Vector2[,] stormCenters;
+	private float[,]   stormValues;
+
+	// Lightning: when the last strike started, where, its flicker and its bolt (world space, cloud base to ground).
+	private const    int       BoltPoints   = 33;
+	private readonly Vector4[] boltPoints   = new Vector4[BoltPoints];
+	private readonly float[]   flashPulses  = new float[3];
+	private          Vector3   flashPosition;
+	private          float     flashStart   = -100f;
+	private          bool      flashHasBolt;
 
 	// The far part of the light cone around the camera, 375 m voxels over the cloud layer.
 	private RenderTexture lightVolumeRT;
@@ -436,6 +447,9 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int CloudRainInfo               = Shader.PropertyToID("_CloudRainInfo");
 	private static readonly int CloudWind                   = Shader.PropertyToID("_CloudWind");
 	private static readonly int CloudStormMap               = Shader.PropertyToID("_CloudStormMap");
+	private static readonly int LightningFlash              = Shader.PropertyToID("_LightningFlash");
+	private static readonly int LightningBolt               = Shader.PropertyToID("_LightningBolt");
+	private static readonly int LightningBoltInfo           = Shader.PropertyToID("_LightningBoltInfo");
 	private static readonly int CloudSkyParams              = Shader.PropertyToID("_CloudSkyParams");
 	private static readonly int CloudSkyTint                = Shader.PropertyToID("_CloudSkyTint");
 	private static readonly int CloudSkySunDir              = Shader.PropertyToID("_CloudSkySunDir");
@@ -530,7 +544,7 @@ public class NoiseController : MonoBehaviour {
 		GUI.Label(new Rect(10, Screen.height - 55, 1000, 25),
 		          $"[F1-F4] Quality: {quality} ({Mathf.Max(stepAmount, 1)} steps)   [F5] Custom    [T] Temporal accumulation: {OnOff(temporalEnabled)}    [U] Temporal upscaling: {upscaling}");
 		GUI.Label(new Rect(10, Screen.height - 30, 1000, 25),
-		          $"[K] Empty space skipping: {OnOff(emptySpaceSkipping)}    [L] Light volume: {OnOff(useLightVolume)}    [O] Distance detail fade: {OnOff(detailFade && detailDistance > 0)}    [H] Cirrus: {OnOff(cirrus)}");
+		          $"[K] Empty space skipping: {OnOff(emptySpaceSkipping)}    [L] Light volume: {OnOff(useLightVolume)}    [O] Distance detail fade: {OnOff(detailFade && detailDistance > 0)}    [H] Cirrus: {OnOff(cirrus)}    [B] Lightning strike");
 	}
 
 	private static string OnOff(bool on) => on ? "on" : "off";
@@ -675,9 +689,9 @@ public class NoiseController : MonoBehaviour {
 	private void CreateStormMap() {
 		const int size = 256, cells = 12;
 		var random = new System.Random(1234);
-		var centers = new Vector2[cells, cells];
+		var centers = stormCenters = new Vector2[cells, cells];
 		var radii   = new float[cells, cells];
-		var values  = new float[cells, cells];
+		var values  = stormValues = new float[cells, cells];
 		for (int y = 0; y < cells; y++) {
 			for (int x = 0; x < cells; x++) {
 				radii[x, y]   = 0.2f + 0.15f * (float)random.NextDouble();
@@ -708,6 +722,74 @@ public class NoiseController : MonoBehaviour {
 		stormMap.SetPixelData(data, 0);
 		stormMap.Apply(false);
 		Shader.SetGlobalTexture(CloudStormMap, stormMap);
+	}
+
+	// Starts strikes at random (strikesPerMinute on average, or B), and gives the composite the flash and the bolt.
+	private void UpdateLightning(Vector3 camPosition, float strikesPerMinute, float stormCells, float towers) {
+		var  keyboard = Keyboard.current;
+		bool manual   = keyboard != null && keyboard.bKey.wasPressedThisFrame;
+		if (manual || Random.value < strikesPerMinute / 60f * UnityEngine.Time.deltaTime) StartStrike(camPosition, stormCells, towers);
+
+		// A few quick pulses, like real strikes flicker.
+		float t         = UnityEngine.Time.time - flashStart;
+		float intensity = 0f;
+		if (t < 1.5f) {
+			foreach (float pulse in flashPulses) {
+				if (t >= pulse) intensity += Mathf.Exp(-(t - pulse) / 0.07f);
+			}
+		}
+		intensity = Mathf.Min(intensity, 1.5f);
+
+		Shader.SetGlobalVector(LightningFlash, new Vector4(flashPosition.x, flashPosition.y, flashPosition.z, intensity));
+		Shader.SetGlobalVectorArray(LightningBolt, boltPoints);
+		Shader.SetGlobalVector(LightningBoltInfo, new Vector4(flashHasBolt && intensity > 0.02f ? BoltPoints : 0, intensity, 0, 0));
+	}
+
+	private void StartStrike(Vector3 camPosition, float stormCells, float towers) {
+		// In an active storm cell within 40 km when there is one (every candidate gets the same chance), else 5 to 30 km
+		// away in any direction.
+		var   camXZ = new Vector2(camPosition.x, camPosition.z);
+		var   spot  = Vector2.zero;
+		int   found = 0;
+		int   cells = stormValues.GetLength(0);
+		const float tile = 128000f;
+		for (int y = 0; y < cells; y++) {
+			for (int x = 0; x < cells; x++) {
+				if (stormValues[x, y] >= stormCells) continue;
+				// The cell centre in the world, in the copy of the tile nearest to the camera.
+				Vector2 center = stormCenters[x, y] / cells * tile + new Vector2(windTravel.x, windTravel.z);
+				center.x += Mathf.Round((camXZ.x - center.x) / tile) * tile;
+				center.y += Mathf.Round((camXZ.y - center.y) / tile) * tile;
+				if ((center - camXZ).sqrMagnitude > 40000f * 40000f) continue;
+				found++;
+				if (Random.value * found < 1f) spot = center;
+			}
+		}
+		spot = found > 0 ? spot + Random.insideUnitCircle * 2000f
+		                 : camXZ + Random.insideUnitCircle.normalized * Random.Range(5000f, 30000f);
+
+		float cloudBase = cumulus.startAltitude;
+		flashPosition = new Vector3(spot.x, cloudBase + Random.Range(800f, 3000f + 3000f * towers), spot.y);
+		flashStart    = UnityEngine.Time.time;
+		for (int i = 0; i < flashPulses.Length; i++) flashPulses[i] = i == 0 ? 0f : Random.Range(0.05f, 0.45f);
+
+		// Most strikes reach the ground.
+		flashHasBolt = Random.value < 0.6f;
+		if (!flashHasBolt) return;
+		boltPoints[0]              = new Vector3(spot.x, cloudBase, spot.y);
+		boltPoints[BoltPoints - 1] = new Vector3(spot.x + Random.Range(-1500f, 1500f), 0f, spot.y + Random.Range(-1500f, 1500f));
+		SubdivideBolt(0, BoltPoints - 1, cloudBase * 0.18f);
+	}
+
+	// Midpoint displacement: every level moves the middle point sideways a bit less than the one before.
+	private void SubdivideBolt(int first, int last, float offset) {
+		if (last - first < 2) return;
+		int     middle = (first + last) / 2;
+		Vector3 point  = ((Vector3)boltPoints[first] + (Vector3)boltPoints[last]) * 0.5f;
+		point += new Vector3(Random.Range(-1f, 1f), Random.Range(-0.3f, 0.3f), Random.Range(-1f, 1f)) * offset;
+		boltPoints[middle] = point;
+		SubdivideBolt(first,  middle, offset * 0.55f);
+		SubdivideBolt(middle, last,   offset * 0.55f);
 	}
 
 	private void CreateLightVolume() {
@@ -895,6 +977,7 @@ public class NoiseController : MonoBehaviour {
 			                                                  2f * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) / Mathf.Max(cam.pixelHeight, 1), 0, 0));
 			// Near the ground the wind is a lot slower than up at the clouds.
 			Shader.SetGlobalVector(CloudWind, new Vector4(windTravel.x, windTravel.z, windVelocity.x * 0.3f, windVelocity.z * 0.3f));
+			UpdateLightning(camPosition, hasWeather ? weather.lightning : 0f, hasWeather ? weather.stormCells : 0f, towers);
 			volumetricsShader.SetVector(SphereCenter,
 			                            new Vector4(sphereCenter.position.x, sphereCenter.position.y,
 			                                        sphereCenter.position.z, 0.0f));
