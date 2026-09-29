@@ -19,7 +19,8 @@ Shader "Custom/VolumetricFog"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
-            
+            #include "ProceduralSky.hlsl"
+
             TEXTURE2D(_VolumetricsTex);
             SAMPLER(sampler_VolumetricsTex);
             
@@ -33,6 +34,8 @@ Shader "Custom/VolumetricFog"
             float4 _CloudShadowCenter;
             // xyz: direction to the light the clouds use, w: height of the cloud base where the shadow map rays start.
             float4 _CloudShadowLight;
+            // Distance in meters over which the air turns the scene into the sky colour, the same as for the clouds.
+            float _CloudHazeDistance;
             static const float _ShadowStrength = 0.4;
             
             half4 frag(Varyings IN) : SV_Target
@@ -67,6 +70,16 @@ Shader "Custom/VolumetricFog"
                         edge *= saturate((_CloudShadowLight.y - 0.05) * 10.0);
                         color.rgb *= lerp(1.0, lerp(_ShadowStrength, 1.0, shadow), edge);
                     }
+                }
+
+                // Far ground fades into the horizon haze like the clouds do, so seen from above the clouds the
+                // gaps and the distance don't show a dark band.
+                if (!isSky && _CloudHazeDistance > 0)
+                {
+                    float3 worldPos = ComputeWorldSpacePosition(IN.texcoord, depth, UNITY_MATRIX_I_VP);
+                    float3 toPixel = worldPos - _WorldSpaceCameraPos;
+                    float dist = length(toPixel);
+                    color.rgb = lerp(color.rgb, procedural_sky(toPixel / max(dist, 1e-3)), 1.0 - exp(-dist / _CloudHazeDistance));
                 }
 
                 // The clouds are premultiplied, so only the scene behind them gets dimmed.

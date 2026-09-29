@@ -4,6 +4,8 @@
 #pragma kernel CloudsShadows
 #pragma kernel LightVolume
 
+#include "ProceduralSky.hlsl"
+
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
 RWTexture2D<float4> Result;
@@ -591,6 +593,7 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
 
     float cos_theta = dot(rayDir, -_LightDirection.xyz);
     float3 fogColor = fogCol;
+    float3 haze_color = procedural_sky(rayDir);
 
     // Empty space skipping: while nothing is around, only every 3rd step gets sampled, and only for the base shape
     // (no detail, no light). When that finds something the march goes back to just after the last empty sample and
@@ -659,13 +662,14 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
         // Powder darkens edges when the sun is behind you, fades out when looking towards the sun.
         float powder = lerp(1.0, 1.0 - exp(-2.0 * shadow_od), powder_strength * saturate(0.5 - 0.5 * cos_theta));
         float3 ambient = ambient_color * lerp(ambient_bottom, 1.0, height_frac);
-        // Fade far samples out so the horizon turns into haze instead of noise.
-        float fade = exp(-cam_distance / max(horizon_fade, 1.0));
-        float step_opacity = (1.0 - exp(-density * stepSize)) * fade;
+        // The air in front of far samples gives them the sky's colour, so the horizon fills up with hazy clouds
+        // instead of turning see-through (which showed the dark ground from above the clouds).
+        float haze = 1.0 - exp(-cam_distance / max(horizon_fade, 1.0));
+        float step_opacity = 1.0 - exp(-density * stepSize);
         // Average distance weighted by how much each step shows up in the final pixel.
         depth_acc += float2(cam_distance, 1.0) * (transmittance * step_opacity);
         // Energy conserving integration (Hillaire 2015), looks the same no matter the step size.
-        fogColor.rgb += transmittance * step_opacity * (light_contribution * sun_light * powder + ambient);
+        fogColor.rgb += transmittance * step_opacity * lerp(light_contribution * sun_light * powder + ambient, haze_color, haze);
         transmittance *= 1.0 - step_opacity;
     }
     return float4(fogColor.rgb, transmittance);
@@ -775,10 +779,12 @@ float4 cirrus(float3 cam, float3 ray_dir, float view_length, out float distance_
     float patches = weather_map.SampleLevel(sampler_weather_map, p / cirrus_scale.z, patch_lod).b;
 
     float density = saturate(remap(patches, 1.0 - cirrus_params.y, 1.0, 0.0, 1.0)) * saturate(wisps * 3.0);
-    float opacity = density * cirrus_params.z * exp(-t / max(horizon_fade, 1.0));
+    float opacity = density * cirrus_params.z;
     // Thin enough that nothing shadows it, so it gets the light the cloud layer gets at its edges.
     float cos_theta = dot(ray_dir, -_LightDirection.xyz);
     float3 color = cloud_light_color() * scattered_light(0.0, cos_theta) + cloud_ambient_color();
+    // Same air as for the cloud layer between the camera and the sheet.
+    color = lerp(color, procedural_sky(ray_dir), 1.0 - exp(-t / max(horizon_fade, 1.0)));
     return float4(color * opacity, opacity);
 }
 

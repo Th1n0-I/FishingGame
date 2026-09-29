@@ -191,8 +191,10 @@ public class NoiseController : MonoBehaviour {
 	private float ambientBottom = 0.4f;
 	[SerializeField, Range(0, 1), Tooltip("Darkens cloud edges when the sun is behind the camera.")]
 	private float powderStrength = 0.5f;
-	[SerializeField, Tooltip("Distance in meters where the clouds have faded to ~37%.")]
-	private float horizonFade = 60000f;
+	[SerializeField, Tooltip("Distance in meters where the air has turned clouds and ground 63% of the way into the sky colour behind them.")]
+	private float horizonFade = 80000f;
+	[SerializeField, Tooltip("How far out clouds get drawn, in meters. The haze hides where they end. Sphere Max Radius is used when it is bigger.")]
+	private float drawDistance = 200000f;
 
 	[Header("-Wind")]
 	[SerializeField, Tooltip("How fast the clouds drift in m/s. Real clouds move about 5 to 30 m/s.")]
@@ -418,6 +420,13 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int CirrusParams                = Shader.PropertyToID("cirrus_params");
 	private static readonly int CirrusScale                 = Shader.PropertyToID("cirrus_scale");
 	private static readonly int PixelAngle                  = Shader.PropertyToID("pixel_angle");
+	private static readonly int CloudSkyParams              = Shader.PropertyToID("_CloudSkyParams");
+	private static readonly int CloudSkyTint                = Shader.PropertyToID("_CloudSkyTint");
+	private static readonly int CloudSkySunDir              = Shader.PropertyToID("_CloudSkySunDir");
+	private static readonly int CloudHazeDistance           = Shader.PropertyToID("_CloudHazeDistance");
+	private static readonly int SkyExposure                 = Shader.PropertyToID("_Exposure");
+	private static readonly int SkyThickness                = Shader.PropertyToID("_AtmosphereThickness");
+	private static readonly int SkyTintID                   = Shader.PropertyToID("_SkyTint");
 
 	#endregion
 
@@ -506,6 +515,28 @@ public class NoiseController : MonoBehaviour {
 	}
 
 	private static string OnOff(bool on) => on ? "on" : "off";
+
+	// The procedural skybox's values, so the clouds and the ground haze (ProceduralSky.hlsl) fade into the same colour
+	// the sky has. The skybox itself follows the scene's sun, also at night.
+	private void SetSkyValues(Vector3 cloudLightForward) {
+		var   sky       = RenderSettings.skybox;
+		float exposure  = sky && sky.HasProperty(SkyExposure) ? sky.GetFloat(SkyExposure) : 1.3f;
+		float thickness = sky && sky.HasProperty(SkyThickness) ? sky.GetFloat(SkyThickness) : 1f;
+		Color tint      = sky && sky.HasProperty(SkyTintID) ? sky.GetColor(SkyTintID) : new Color(0.5f, 0.5f, 0.5f);
+		var   skySun    = RenderSettings.sun;
+		var   toSun     = skySun ? -skySun.transform.forward : -cloudLightForward;
+
+		var skyParams = new Vector4(exposure, thickness, 0, 0);
+		var skyTint   = new Vector4(tint.r, tint.g, tint.b, 0);
+		var skySunDir = new Vector4(toSun.x, toSun.y, toSun.z, 0);
+		volumetricsShader.SetVector(CloudSkyParams, skyParams);
+		volumetricsShader.SetVector(CloudSkyTint,   skyTint);
+		volumetricsShader.SetVector(CloudSkySunDir, skySunDir);
+		Shader.SetGlobalVector(CloudSkyParams, skyParams);
+		Shader.SetGlobalVector(CloudSkyTint,   skyTint);
+		Shader.SetGlobalVector(CloudSkySunDir, skySunDir);
+		Shader.SetGlobalFloat(CloudHazeDistance, Mathf.Max(horizonFade, 1f));
+	}
 
 	private QualityValues CurrentQualityValues() => new QualityValues {
 		stepAmount = stepAmount, textureDivide = textureDivide, upscaling = temporalUpscaling, detailDistance = detailDistance
@@ -770,6 +801,7 @@ public class NoiseController : MonoBehaviour {
 
 			volumetricsShader.SetVector(MainLightColor, cycle ? dayNightCycle.CloudLightColor : sun.color.linear);
 			volumetricsShader.SetVector(LightDirection, lightForward);
+			SetSkyValues(lightForward);
 
 			volumetricsShader.SetVector(MinBounds, bounds.bounds.min);
 			volumetricsShader.SetVector(MaxBounds, bounds.bounds.max);
@@ -786,7 +818,7 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(ShadowDensity,     shadowDensity);
 			volumetricsShader.SetFloat(Gradient1,         gradient);
 			volumetricsShader.SetFloat(SphereMinRadius,   sphereMinRadius);
-			volumetricsShader.SetFloat(SphereMaxRadius,   sphereMaxRadius);
+			volumetricsShader.SetFloat(SphereMaxRadius,   Mathf.Max(sphereMaxRadius, drawDistance));
 			volumetricsShader.SetFloat(SquishFactor,      squishFactor);
 			volumetricsShader.SetFloat(CumulusYMin,       cumulusYMin);
 			volumetricsShader.SetFloat(CumulusYMax,       cumulusYMax);
