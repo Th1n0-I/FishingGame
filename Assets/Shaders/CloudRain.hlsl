@@ -1,0 +1,17 @@
+#ifndef CLOUD_RAIN_INCLUDED
+#define CLOUD_RAIN_INCLUDED
+
+// How hard it rains under a point of the weather map, 0 to 1. Shared by the rain curtains in VolumetricCompute and the
+// rain around the camera in the composite, so both agree.
+// weather: the weather map sample (r = coverage noise, low is cloudy), storm_cell: the storm map sample
+// (r = falloff, g = the cell's random value), rain: x rain amount, y coverage, z towers, w share of active storm cells.
+float cloud_precipitation(float4 weather, float2 storm_cell, float4 rain)
+{
+    // Under the thickest part of the cloud cover...
+    float dense = saturate((rain.y - weather.r - 0.2) * 3.0);
+    // ...and hard under the active storm cells. With storms about, most of the rain comes from the cells.
+    float cell = storm_cell.x * saturate((rain.w - storm_cell.y) * 8.0);
+    return rain.x * max(dense * (1.0 - 0.8 * rain.z), cell);
+}
+
+#endif

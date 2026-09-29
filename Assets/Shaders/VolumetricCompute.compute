@@ -5,6 +5,7 @@
 #pragma kernel LightVolume
 
 #include "ProceduralSky.hlsl"
+#include "CloudRain.hlsl"
 
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
@@ -259,6 +260,10 @@ Texture2D<float2> storm_map;
 SamplerState sampler_storm_map;
 // x: how much the active cells grow into towers (0 = no storms), y: share of the cells that are active.
 float4 storm_params;
+// x: rain amount (0 = no rain), y: coverage, z: towers, w: share of active storm cells (see CloudRain.hlsl).
+float4 rain_params;
+// Height of the cloud base, the rain falls below it.
+float rain_base;
 
 float storm_amount(float2 xz)
 {
@@ -808,6 +813,62 @@ float4 cirrus(float3 cam, float3 ray_dir, float view_length, out float distance_
     return float4(color * opacity, opacity);
 }
 
+// Rain between the ground and the cloud base, 6 samples along the view ray. The density follows the weather map and
+// the storm cells (CloudRain.hlsl), so dark grey curtains hang under the storms. Returns the premultiplied colour and
+// the opacity, and the average distance for the reprojection.
+float4 rain_curtains(float3 cam, float3 ray, float view_length, float jitter, out float mean_distance)
+{
+    mean_distance = 0;
+    if (rain_params.x <= 0) return float4(0.0, 0.0, 0.0, 0.0);
+
+    // Where the ray is between the ground and the cloud base, no further than 60 km.
+    float t0 = 0, t1 = 0;
+    if (abs(ray.y) < 1e-5)
+    {
+        if (cam.y > 0 && cam.y < rain_base) t1 = 60000.0;
+    }
+    else
+    {
+        float to_ground = -cam.y / ray.y;
+        float to_base = (rain_base - cam.y) / ray.y;
+        t0 = max(min(to_ground, to_base), 0.0);
+        t1 = max(to_ground, to_base);
+    }
+    t1 = min(t1, min(view_length, 60000.0));
+    if (t1 <= t0) return float4(0.0, 0.0, 0.0, 0.0);
+
+    // Lit mostly by the sky, rain curtains look dark grey against it.
+    float3 rain_color = cloud_ambient_color() * 0.7 + cloud_light_color() * 0.02;
+    float3 haze_color = procedural_sky(ray);
+    float dt = (t1 - t0) / 6.0;
+    float3 color = float3(0.0, 0.0, 0.0);
+    float transmittance = 1.0;
+    float2 distance_acc = float2(0.0, 0.0);
+    for (int k = 0; k < 6; k++)
+    {
+        float t = t0 + (k + jitter) * dt;
+        float2 uv = (cam.xz + ray.xz * t - wind_travel.xz) / 128000;
+        float precipitation = cloud_precipitation(weather_map.SampleLevel(sampler_weather_map, uv, 0),
+                                                  storm_map.SampleLevel(sampler_storm_map, uv, 0), rain_params);
+        // Heavy rain lets you see about 1.5 km.
+        float opacity = 1.0 - exp(-precipitation / 1500.0 * dt);
+        float haze = 1.0 - exp(-t / max(horizon_fade, 1.0));
+        color += transmittance * opacity * lerp(rain_color, haze_color, haze);
+        distance_acc += float2(t, 1.0) * (transmittance * opacity);
+        transmittance *= 1.0 - opacity;
+    }
+    mean_distance = distance_acc.y > 1e-4 ? distance_acc.x / distance_acc.y : 0.0;
+    return float4(color, 1.0 - transmittance);
+}
+
+// Puts a layer (premultiplied colour, opacity) behind what res already holds.
+void add_behind(inout float4 res, inout float2 depth_acc, float4 layer, float layer_distance)
+{
+    depth_acc += float2(layer_distance, 1.0) * (res.a * layer.a);
+    res.rgb += res.a * layer.rgb;
+    res.a *= 1.0 - layer.a;
+}
+
 [numthreads(8,8,1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
 {
@@ -831,25 +892,20 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     float3 rayDir = normalize(viewDir);
 
 
-    // rgb: premultiplied colour, a: transmittance. The cirrus is in front of the cloud layer when the camera is
-    // above it and behind it otherwise.
+    // rgb: premultiplied colour, a: transmittance. Front to back: the cirrus is above the cloud layer and the rain
+    // below it, so which comes first depends on where the camera is.
     float4 res = float4(0.0, 0.0, 0.0, 1.0);
     float2 depth_acc = float2(0.0, 0.0);
-    float cirrus_distance;
+    float cirrus_distance, rain_distance;
     float4 cirrus_layer = cirrus(entryPos, rayDir, viewLength, cirrus_distance);
+    float4 rain_layer = rain_curtains(entryPos, rayDir, viewLength, ign(jitter_id), rain_distance);
     bool above_cirrus = entryPos.y > cirrus_params.x;
-    if (above_cirrus)
-    {
-        depth_acc += float2(cirrus_distance, 1.0) * cirrus_layer.a;
-        res = float4(cirrus_layer.rgb, 1.0 - cirrus_layer.a);
-    }
+    bool below_base = entryPos.y < rain_base;
+    if (above_cirrus) add_behind(res, depth_acc, cirrus_layer, cirrus_distance);
+    if (below_base) add_behind(res, depth_acc, rain_layer, rain_distance);
     res = march_cloud_layer(entryPos, rayDir, viewLength, jitter_id, res, depth_acc);
-    if (!above_cirrus)
-    {
-        depth_acc += float2(cirrus_distance, 1.0) * (res.a * cirrus_layer.a);
-        res.rgb += res.a * cirrus_layer.rgb;
-        res.a *= 1.0 - cirrus_layer.a;
-    }
+    if (!below_base) add_behind(res, depth_acc, rain_layer, rain_distance);
+    if (!above_cirrus) add_behind(res, depth_acc, cirrus_layer, cirrus_distance);
     Result[id.xy] = float4(res.rgb, 1.0 - saturate((res.a <= 0.01 ? 0 : res.a)));
     ResultDepth[id.xy] = depth_acc.y > 0.001 ? depth_acc.x / depth_acc.y : 0.0;
 }

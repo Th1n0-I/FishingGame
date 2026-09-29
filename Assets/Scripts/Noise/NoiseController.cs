@@ -430,6 +430,12 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int PixelAngle                  = Shader.PropertyToID("pixel_angle");
 	private static readonly int StormMap                    = Shader.PropertyToID("storm_map");
 	private static readonly int StormParams                 = Shader.PropertyToID("storm_params");
+	private static readonly int RainParams                  = Shader.PropertyToID("rain_params");
+	private static readonly int RainBase                    = Shader.PropertyToID("rain_base");
+	private static readonly int CloudRain                   = Shader.PropertyToID("_CloudRain");
+	private static readonly int CloudRainInfo               = Shader.PropertyToID("_CloudRainInfo");
+	private static readonly int CloudWind                   = Shader.PropertyToID("_CloudWind");
+	private static readonly int CloudStormMap               = Shader.PropertyToID("_CloudStormMap");
 	private static readonly int CloudSkyParams              = Shader.PropertyToID("_CloudSkyParams");
 	private static readonly int CloudSkyTint                = Shader.PropertyToID("_CloudSkyTint");
 	private static readonly int CloudSkySunDir              = Shader.PropertyToID("_CloudSkySunDir");
@@ -701,6 +707,7 @@ public class NoiseController : MonoBehaviour {
 		};
 		stormMap.SetPixelData(data, 0);
 		stormMap.Apply(false);
+		Shader.SetGlobalTexture(CloudStormMap, stormMap);
 	}
 
 	private void CreateLightVolume() {
@@ -876,6 +883,18 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetVector(MinBounds, cloudBoxMin);
 			volumetricsShader.SetVector(MaxBounds, cloudBoxMax);
 			volumetricsShader.SetVector(StormParams, new Vector4(towers, hasWeather ? weather.stormCells : 0f, 0, 0));
+
+			// Rain: curtains below the cloud base in the raymarch, streaks around the camera in the composite. Both
+			// use the same weather values (CloudRain.hlsl).
+			var rainParams = new Vector4(hasWeather ? weather.rain : 0f, hasWeather ? weather.coverage : cloudCoverage, towers,
+			                             hasWeather ? weather.stormCells : 0f);
+			volumetricsShader.SetVector(RainParams, rainParams);
+			volumetricsShader.SetFloat(RainBase, cumulus.startAltitude);
+			Shader.SetGlobalVector(CloudRain, rainParams);
+			Shader.SetGlobalVector(CloudRainInfo, new Vector4(cumulus.startAltitude,
+			                                                  2f * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) / Mathf.Max(cam.pixelHeight, 1), 0, 0));
+			// Near the ground the wind is a lot slower than up at the clouds.
+			Shader.SetGlobalVector(CloudWind, new Vector4(windTravel.x, windTravel.z, windVelocity.x * 0.3f, windVelocity.z * 0.3f));
 			volumetricsShader.SetVector(SphereCenter,
 			                            new Vector4(sphereCenter.position.x, sphereCenter.position.y,
 			                                        sphereCenter.position.z, 0.0f));
