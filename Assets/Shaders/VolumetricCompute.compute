@@ -253,6 +253,20 @@ float remap(float v, float inMin, float inMax, float outMin, float outMax)
     return outMin + (v - inMin) / (inMax - inMin) * (outMax - outMin);
 }
 
+// Storm cells, round and not overlapping, over the same 128 km tile as the weather map. r: 1 in the middle of a cell
+// fading to 0 at its edge, g: the cell's random value, which decides if it is active.
+Texture2D<float2> storm_map;
+SamplerState sampler_storm_map;
+// x: how much the active cells grow into towers (0 = no storms), y: share of the cells that are active.
+float4 storm_params;
+
+float storm_amount(float2 xz)
+{
+    if (storm_params.x <= 0) return 0.0;
+    float2 cell = storm_map.SampleLevel(sampler_storm_map, (xz - wind_travel.xz) / 128000, 0);
+    return storm_params.x * cell.x * saturate((storm_params.y - cell.y) * 8.0);
+}
+
 // detail_amount 1 = full detail, 0 = erode by the average detail instead, which skips the detail texture (distance LOD
 // and the cheap shadow samples). bound_only returns the density before the detail erodes it: the detail can only take
 // density away, so where this is 0 the full density is 0 too.
@@ -328,6 +342,10 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
 
     float4 weather = weather_map.SampleLevel(sampler_weather_map, (worldPos.xz - wind_travel.xz) / 128000, 0);
     float sampled_cloud_type = weather.g * 2;
+    // Storm cells (only when the weather has towers): the clouds there get taller, denser and grow an anvil.
+    float storm = storm_amount(worldPos.xz);
+    float tower = 1.0 + 1.4 * storm;
+    float cell_coverage = saturate(coverage + 0.2 * storm);
     float height_frac = 0;
     //float altitude = distance(worldPos, _SphereCenter) - _SphereMinRadius;
     float altitude = worldPos.y;
@@ -337,7 +355,7 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
     if (sampled_cloud_type == 0)
     {
         cloud = unpack(stratus_floats);
-        height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
+        height_frac = (altitude - cloud.start_altitude) / ((cloud.end_altitude - cloud.start_altitude) * tower);
         if (height_frac < 0.0) return 0;
         shapeGradient = stratus_shape_lut.SampleLevel(sampler_stratus_shape_lut, float2(height_frac, 0.5), 0);
         densityGradient = stratus_density_lut.SampleLevel(sampler_stratus_density_lut, float2(height_frac, 0.5), 0);
@@ -345,7 +363,7 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
     else if (sampled_cloud_type == 1)
     {
         cloud = unpack(stratocumulus_floats);
-        height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
+        height_frac = (altitude - cloud.start_altitude) / ((cloud.end_altitude - cloud.start_altitude) * tower);
         if (height_frac < 0.0) return 0;
         shapeGradient = stratocumulus_shape_lut.SampleLevel(sampler_stratocumulus_shape_lut, float2(height_frac, 0.5),
                                                             0);
@@ -355,7 +373,7 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
     else if (sampled_cloud_type == 2)
     {
         cloud = unpack(cumulus_floats);
-        height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
+        height_frac = (altitude - cloud.start_altitude) / ((cloud.end_altitude - cloud.start_altitude) * tower);
         if (height_frac < 0.0) return 0;
         shapeGradient = cumulus_shape_lut.SampleLevel(sampler_cumulus_shape_lut, float2(height_frac, 0.5), 0);
         densityGradient = cumulus_density_lut.SampleLevel(sampler_cumulus_density_lut, float2(height_frac, 0.5), 0);
@@ -365,7 +383,7 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
     {
         float t = sampled_cloud_type;
         cloud = unpack_lerp(stratus_floats, stratocumulus_floats, t);
-        height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
+        height_frac = (altitude - cloud.start_altitude) / ((cloud.end_altitude - cloud.start_altitude) * tower);
         if (height_frac < 0.0) return 0;
         shapeGradient = stratus_shape_lut.SampleLevel(sampler_stratus_shape_lut, float2(height_frac, 0.5), 0);
         densityGradient = stratus_density_lut.SampleLevel(sampler_stratus_density_lut, float2(height_frac, 0.5), 0);
@@ -374,7 +392,7 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
     {
         float t = sampled_cloud_type - 1;
         cloud = unpack_lerp(stratocumulus_floats, cumulus_floats, t);
-        height_frac = (altitude - cloud.start_altitude) / (cloud.end_altitude - cloud.start_altitude);
+        height_frac = (altitude - cloud.start_altitude) / ((cloud.end_altitude - cloud.start_altitude) * tower);
         if (height_frac < 0.0) return 0;
         shapeGradient = gradient_lerp(stratocumulus_shape_lut, sampler_stratocumulus_shape_lut,
                                       cumulus_shape_lut, sampler_cumulus_shape_lut, float2(height_frac, 0.5), t);
@@ -382,8 +400,10 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
                                         cumulus_density_lut, sampler_cumulus_density_lut, float2(height_frac, 0.5), t);
     }
     last_height_frac = height_frac;
+    // The anvil: the top of a storm cell spreads out.
+    shapeGradient = max(shapeGradient, storm * 0.7 * smoothstep(0.7, 0.82, height_frac) * (1.0 - smoothstep(0.9, 1.0, height_frac)));
 
-    if ((1 - coverage) + weather.r >= 1.0) return 0;
+    if ((1 - cell_coverage) + weather.r >= 1.0) return 0;
     worldPos.xz -= wind_direction.xy * (saturate(height_frac) * wind_shear); // Tops lean downwind.
 
     float3 perlin_world_pos = float3((worldPos.x - wind_travel.x) / _NoiseSize,
@@ -395,8 +415,8 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
     float base = perlin.a;
     base = remap(base, (1 - detail) * detail_fbm_mult, 1.0, 0.0, 1.0);
     base = base * shapeGradient;
-    base = saturate(remap(base, saturate((1 - coverage) + weather.r - cloud.coverage), 1.0, 0.0, 1.0));
-    float scale = full_density_mult * cloud.density * densityGradient;
+    base = saturate(remap(base, saturate((1 - cell_coverage) + weather.r - cloud.coverage), 1.0, 0.0, 1.0));
+    float scale = full_density_mult * cloud.density * densityGradient * (1.0 + 0.5 * storm);
     last_bound = base * scale;
     // The detail can only erode, so an empty base stays empty and the detail sample can be skipped.
     if (bound_only || last_bound <= 0) return max(last_bound, 0.0);

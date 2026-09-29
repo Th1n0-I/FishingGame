@@ -223,6 +223,12 @@ public class NoiseController : MonoBehaviour {
 	[SerializeField, Tooltip("Create a Day Night Cycle with the default settings when the scene doesn't have one.")]
 	private bool createDayNightCycle = true;
 
+	[Header("-Weather")]
+	[SerializeField, Tooltip("Drives coverage, storms, wind, rain and lightning. When empty the one in the scene is used, or one gets created.")]
+	private WeatherSystem weatherSystem;
+	[SerializeField, Tooltip("Create a Weather System with the default settings when the scene doesn't have one. Without one the settings above are used.")]
+	private bool createWeatherSystem = true;
+
 	[Header("Cloud Types")]
 	[SerializeField] private CloudType stratus;
 	[SerializeField] private CloudType   stratocumulus;
@@ -278,6 +284,8 @@ public class NoiseController : MonoBehaviour {
 	// How far the wind has carried the clouds and how far the detail has risen, in meters.
 	private Vector3 windTravel;
 	private float   detailRise;
+
+	private Texture2D stormMap;
 
 	// The far part of the light cone around the camera, 375 m voxels over the cloud layer.
 	private RenderTexture lightVolumeRT;
@@ -420,6 +428,8 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int CirrusParams                = Shader.PropertyToID("cirrus_params");
 	private static readonly int CirrusScale                 = Shader.PropertyToID("cirrus_scale");
 	private static readonly int PixelAngle                  = Shader.PropertyToID("pixel_angle");
+	private static readonly int StormMap                    = Shader.PropertyToID("storm_map");
+	private static readonly int StormParams                 = Shader.PropertyToID("storm_params");
 	private static readonly int CloudSkyParams              = Shader.PropertyToID("_CloudSkyParams");
 	private static readonly int CloudSkyTint                = Shader.PropertyToID("_CloudSkyTint");
 	private static readonly int CloudSkySunDir              = Shader.PropertyToID("_CloudSkySunDir");
@@ -453,6 +463,8 @@ public class NoiseController : MonoBehaviour {
 
 		if (!dayNightCycle) dayNightCycle = FindAnyObjectByType<DayNightCycle>();
 		if (!dayNightCycle && createDayNightCycle) dayNightCycle = new GameObject("Day Night Cycle").AddComponent<DayNightCycle>();
+		if (!weatherSystem) weatherSystem = FindAnyObjectByType<WeatherSystem>();
+		if (!weatherSystem && createWeatherSystem) weatherSystem = new GameObject("Weather System").AddComponent<WeatherSystem>();
 
 		customQuality = CurrentQualityValues();
 		ApplyQuality(quality);
@@ -479,6 +491,7 @@ public class NoiseController : MonoBehaviour {
 	private void OnDestroy() {
 		ReleaseCloudTextures();
 		foreach (var rt in new[] { perlinRenderTexture, worleyRenderTexture, weatherRenderTexture, shadowRT, lightVolumeRT }) DestroyTexture(rt);
+		if (stormMap) Destroy(stormMap);
 		if (cloudTypes != null) foreach (var v in cloudTypes) v?.Release();
 		if (CumulusLut) Destroy(CumulusLut);
 		minMaxValues?.Release();
@@ -518,7 +531,7 @@ public class NoiseController : MonoBehaviour {
 
 	// The procedural skybox's values, so the clouds and the ground haze (ProceduralSky.hlsl) fade into the same colour
 	// the sky has. The skybox itself follows the scene's sun, also at night.
-	private void SetSkyValues(Vector3 cloudLightForward) {
+	private void SetSkyValues(Vector3 cloudLightForward, float hazeDistance) {
 		var   sky       = RenderSettings.skybox;
 		float exposure  = sky && sky.HasProperty(SkyExposure) ? sky.GetFloat(SkyExposure) : 1.3f;
 		float thickness = sky && sky.HasProperty(SkyThickness) ? sky.GetFloat(SkyThickness) : 1f;
@@ -535,7 +548,7 @@ public class NoiseController : MonoBehaviour {
 		Shader.SetGlobalVector(CloudSkyParams, skyParams);
 		Shader.SetGlobalVector(CloudSkyTint,   skyTint);
 		Shader.SetGlobalVector(CloudSkySunDir, skySunDir);
-		Shader.SetGlobalFloat(CloudHazeDistance, Mathf.Max(horizonFade, 1f));
+		Shader.SetGlobalFloat(CloudHazeDistance, hazeDistance);
 	}
 
 	private QualityValues CurrentQualityValues() => new QualityValues {
@@ -637,8 +650,10 @@ public class NoiseController : MonoBehaviour {
 		CreateShadowTexture();
 		CreateCurveLuts();
 		CreateLightVolume();
+		CreateStormMap();
 
 		foreach (int kernel in new[] { KernelMain, KernelShadows, KernelLightVolume }) {
+			volumetricsShader.SetTexture(kernel, StormMap,   stormMap);
 			volumetricsShader.SetTexture(kernel, WeatherMap, weatherRenderTexture);
 			volumetricsShader.SetTexture(kernel, PerlinTex1, perlinRenderTexture);
 			volumetricsShader.SetTexture(kernel, WorleyTex1, worleyRenderTexture);
@@ -646,6 +661,46 @@ public class NoiseController : MonoBehaviour {
 		}
 		volumetricsShader.SetTexture(KernelMain,        LightVolume,    lightVolumeRT);
 		volumetricsShader.SetTexture(KernelLightVolume, LightVolumeOut, lightVolumeRT);
+	}
+
+	// Round storm cells on a jittered 12x12 grid over the weather map's 128 km tile. r: 1 in the middle fading to 0 at the
+	// edge, g: a random value per cell, the shader turns on the cells below the weather's share. The circles stay inside
+	// their grid cell, so they never overlap and the filtering never mixes two cells.
+	private void CreateStormMap() {
+		const int size = 256, cells = 12;
+		var random = new System.Random(1234);
+		var centers = new Vector2[cells, cells];
+		var radii   = new float[cells, cells];
+		var values  = new float[cells, cells];
+		for (int y = 0; y < cells; y++) {
+			for (int x = 0; x < cells; x++) {
+				radii[x, y]   = 0.2f + 0.15f * (float)random.NextDouble();
+				float room    = 0.5f - radii[x, y];
+				centers[x, y] = new Vector2(x + 0.5f + room * (2f * (float)random.NextDouble() - 1f),
+				                            y + 0.5f + room * (2f * (float)random.NextDouble() - 1f));
+				values[x, y]  = (float)random.NextDouble();
+			}
+		}
+
+		var data = new float[size * size * 2];
+		for (int y = 0; y < size; y++) {
+			for (int x = 0; x < size; x++) {
+				var   p     = new Vector2((x + 0.5f) / size * cells, (y + 0.5f) / size * cells);
+				int   cx    = Mathf.Min((int)p.x, cells - 1), cy = Mathf.Min((int)p.y, cells - 1);
+				float d     = Vector2.Distance(p, centers[cx, cy]) / radii[cx, cy];
+				float t     = Mathf.Clamp01(1f - d);
+				int   index = (y * size + x) * 2;
+				data[index]     = t * t * (3f - 2f * t);
+				data[index + 1] = values[cx, cy];
+			}
+		}
+
+		stormMap = new Texture2D(size, size, TextureFormat.RGFloat, false, true) {
+			wrapMode   = TextureWrapMode.Repeat,
+			filterMode = FilterMode.Bilinear,
+		};
+		stormMap.SetPixelData(data, 0);
+		stormMap.Apply(false);
 	}
 
 	private void CreateLightVolume() {
@@ -758,10 +813,17 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(TemporalBlend, blend);
 			volumetricsShader.SetBool(HistoryValid, historyValid);
 
+			// The weather's values, or the settings above when there is no Weather System.
+			bool  hasWeather = weatherSystem;
+			var   weather    = hasWeather ? weatherSystem.Current : default;
+			float darkness   = hasWeather ? weather.darkness : 0f;
+			float hazeDistance = Mathf.Max(horizonFade * (hasWeather ? weather.visibility : 1f), 1f);
+			float towers     = hasWeather ? weather.towers : 0f;
+
 			// One wind moves every noise layer, so the history can be moved back by exactly the same step.
 			float   deltaTime     = UnityEngine.Time.deltaTime;
 			Vector2 windDir       = windDirection.sqrMagnitude > 1e-6f ? windDirection.normalized : Vector2.left;
-			var     windVelocity  = new Vector3(windDir.x, 0, windDir.y) * windSpeed;
+			var     windVelocity  = new Vector3(windDir.x, 0, windDir.y) * (hasWeather ? weatherSystem.WindSpeed : windSpeed);
 			windTravel += windVelocity * deltaTime;
 			detailRise += detailRiseSpeed * deltaTime;
 			volumetricsShader.SetVector(WindTravel,      new Vector4(windTravel.x, windTravel.y, windTravel.z, detailRise));
@@ -793,18 +855,27 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetVector(CamPos,
 			                            new Vector4(cam.transform.position.x, cam.transform.position.y,
 			                                        cam.transform.position.z, 0.0f));
-			volumetricsShader.SetVector(FogColor,          cycle ? dayNightCycle.CloudAmbient : fogColor);
-			volumetricsShader.SetVector(FogBaseColorNight, cycle ? dayNightCycle.CloudAmbient : fogColorNight);
+			// Under heavy cloud the light cone only sees the first few hundred meters, so the weather darkens the
+			// direct light and the sky light on top of that.
+			float lightDim   = 1f - 0.6f * darkness;
+			float ambientDim = 1f - 0.4f * darkness;
+			volumetricsShader.SetVector(FogColor,          (cycle ? dayNightCycle.CloudAmbient : fogColor) * ambientDim);
+			volumetricsShader.SetVector(FogBaseColorNight, (cycle ? dayNightCycle.CloudAmbient : fogColorNight) * ambientDim);
 
 			volumetricsShader.SetVector(LightContribution,       lightContribution);
 			volumetricsShader.SetVector(LightContributionSunset, cycle ? lightContribution : lightContributionSunset);
 
-			volumetricsShader.SetVector(MainLightColor, cycle ? dayNightCycle.CloudLightColor : sun.color.linear);
+			volumetricsShader.SetVector(MainLightColor, (cycle ? dayNightCycle.CloudLightColor : sun.color.linear) * lightDim);
 			volumetricsShader.SetVector(LightDirection, lightForward);
-			SetSkyValues(lightForward);
+			SetSkyValues(lightForward, hazeDistance);
 
-			volumetricsShader.SetVector(MinBounds, bounds.bounds.min);
-			volumetricsShader.SetVector(MaxBounds, bounds.bounds.max);
+			// Storm towers grow up to 2.4x the cumulus height, the box grows with them.
+			var cloudBoxMin = bounds.bounds.min;
+			var cloudBoxMax = bounds.bounds.max;
+			cloudBoxMax.y = Mathf.Max(cloudBoxMax.y, cumulus.startAltitude + cumulus.height * (1f + 1.4f * towers));
+			volumetricsShader.SetVector(MinBounds, cloudBoxMin);
+			volumetricsShader.SetVector(MaxBounds, cloudBoxMax);
+			volumetricsShader.SetVector(StormParams, new Vector4(towers, hasWeather ? weather.stormCells : 0f, 0, 0));
 			volumetricsShader.SetVector(SphereCenter,
 			                            new Vector4(sphereCenter.position.x, sphereCenter.position.y,
 			                                        sphereCenter.position.z, 0.0f));
@@ -830,7 +901,7 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(DetailWeight1,     smallDetail1Weight);
 			volumetricsShader.SetFloat(DetailWeight2,     smallDetail2Weight);
 			volumetricsShader.SetFloat(DetailWeight3,     smallDetail3Weight);
-			volumetricsShader.SetFloat(FullDensityMult,   fullDensityMult);
+			volumetricsShader.SetFloat(FullDensityMult,   fullDensityMult * (hasWeather ? weather.density : 1f));
 			volumetricsShader.SetFloat(Time,              UnityEngine.Time.time);
 			volumetricsShader.SetFloat(ShadowStepSize,    shadowStepSize);
 			volumetricsShader.SetFloat(ShadowConeSpread,  shadowConeSpread);
@@ -838,16 +909,16 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(BackScatteringWeight, backScatteringWeight);
 			volumetricsShader.SetFloat(AmbientBottom,     ambientBottom);
 			volumetricsShader.SetFloat(PowderStrength,    powderStrength);
-			volumetricsShader.SetFloat(HorizonFade,       horizonFade);
+			volumetricsShader.SetFloat(HorizonFade,       hazeDistance);
 			volumetricsShader.SetFloat(WindShear,         windShear);
-			volumetricsShader.SetFloat(Coverage,          cloudCoverage);
+			volumetricsShader.SetFloat(Coverage,          hasWeather ? weather.coverage : cloudCoverage);
 
 			volumetricsShader.SetBool(EmptySpaceSkipping, emptySpaceSkipping);
 			// Detail amount = saturate(distance * x + y): full up to 60% of the detail distance, none at the distance.
 			volumetricsShader.SetVector(LodFade, detailFade && detailDistance > 0
 				                                     ? new Vector4(-1f / (0.4f * detailDistance), 2.5f, 0, 0)
 				                                     : new Vector4(0, 1, 0, 0));
-			volumetricsShader.SetVector(CirrusParams, new Vector4(cirrusHeight, cirrusCoverage, cirrusOpacity, cirrus ? 1 : 0));
+			volumetricsShader.SetVector(CirrusParams, new Vector4(cirrusHeight, hasWeather ? weather.cirrus : cirrusCoverage, cirrusOpacity, cirrus ? 1 : 0));
 			volumetricsShader.SetVector(CirrusScale,  new Vector4(Mathf.Max(cirrusStreakSize.x, 1), Mathf.Max(cirrusStreakSize.y, 1),
 			                                                      Mathf.Max(cirrusPatchSize, 1), 0));
 			volumetricsShader.SetFloat(PixelAngle, 2f * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) / historyWrite.height);
@@ -883,8 +954,8 @@ public class NoiseController : MonoBehaviour {
 			// wind or the sun. Snapped to whole voxels so the voxels stay put in the world while the camera moves.
 			volumetricsShader.SetBool(UseLightVolumeID, useLightVolume);
 			if (useLightVolume) {
-				var   boxMin = bounds.bounds.min;
-				var   boxMax = bounds.bounds.max;
+				var   boxMin = cloudBoxMin;
+				var   boxMax = cloudBoxMax;
 				float voxel  = LightVolumeSize / LightVolumeWidth;
 				// Spans the box height, shifted so a layer of voxel centres sits just above the cloud base. Otherwise
 				// the filtering pulls in the clear air below and the cloud bottoms get too bright at low sun.

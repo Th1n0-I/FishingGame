@@ -55,6 +55,8 @@ public class DayNightCycle : MonoBehaviour {
 	public Color     CloudLightColor { get; private set; }
 	public Color     CloudAmbient    { get; private set; }
 	public float     TimeOfDay       => timeOfDay;
+	// Sets the scene ambient every frame (so others can change it afterwards without it adding up).
+	public bool      ControlsSceneAmbient => controlSceneAmbient;
 
 	private void Awake() {
 		if (!sun) sun = RenderSettings.sun;
