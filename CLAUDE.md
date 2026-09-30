@@ -8,7 +8,7 @@ Only provide guidance, do not write code to any files instead instruct me as I w
 - Agents are wanted. Use them for bigger jobs (see the agent rules below).
 - Before a big round, tell me roughly how big it is so I can decide.
 - My 5-hour usage limit runs out in about 1.5 hours of heavy work. Times are Swedish time.
-- Every message gets one plain sentence saying what was done. Explain big things at my level (Unity, C#, HLSL, graphics), keep small things to one line.
+- Add a plain sentence saying what was done only when I probably need it (judge it from what I know and how important the thing is). Explain big things at my level (Unity, C#, HLSL, graphics), keep small things to one line.
 
 # Agent rules (I asked for these explicitly)
 - Every agent keeps a log file in docs/agent-logs/<agent-name>.md with everything it tries and how well each thing worked (what it changed, what it measured or saw, kept or dropped and why). Failed attempts go in too.
