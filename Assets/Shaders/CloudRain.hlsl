@@ -1,8 +1,8 @@
 #ifndef CLOUD_RAIN_INCLUDED
 #define CLOUD_RAIN_INCLUDED
 
-// How hard it rains under a point of the weather map, 0 to 1. Shared by the rain curtains in VolumetricCompute and the
-// rain around the camera in the composite, so both agree.
+// How hard it rains under a point of the weather map, 0 to 1, for the rain around the camera in the composite. The rain
+// curtains in VolumetricCompute (rain_density) shape the same values into shafts under the storm cells.
 // weather: the weather map sample (r = coverage noise, low is cloudy), storm_cell: the storm map sample
 // (r = falloff, g = the cell's random value), rain: x rain amount, y coverage, z towers, w share of active storm cells.
 float cloud_precipitation(float4 weather, float2 storm_cell, float4 rain)

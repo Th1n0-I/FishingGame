@@ -966,8 +966,8 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetVector(MaxBounds, cloudBoxMax);
 			volumetricsShader.SetVector(StormParams, new Vector4(towers, hasWeather ? weather.stormCells : 0f, 0, 0));
 
-			// Rain: curtains below the cloud base in the raymarch, streaks around the camera in the composite. Both
-			// use the same weather values (CloudRain.hlsl).
+			// Rain: curtains below the cloud base in the raymarch (rain_density), streaks around the camera in the
+			// composite (CloudRain.hlsl). Both use the same weather values.
 			var rainParams = new Vector4(hasWeather ? weather.rain : 0f, hasWeather ? weather.coverage : cloudCoverage, towers,
 			                             hasWeather ? weather.stormCells : 0f);
 			volumetricsShader.SetVector(RainParams, rainParams);

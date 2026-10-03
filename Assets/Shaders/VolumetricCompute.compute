@@ -5,7 +5,6 @@
 #pragma kernel LightVolume
 
 #include "ProceduralSky.hlsl"
-#include "CloudRain.hlsl"
 
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
@@ -260,7 +259,7 @@ Texture2D<float2> storm_map;
 SamplerState sampler_storm_map;
 // x: how much the active cells grow into towers (0 = no storms), y: share of the cells that are active.
 float4 storm_params;
-// x: rain amount (0 = no rain), y: coverage, z: towers, w: share of active storm cells (see CloudRain.hlsl).
+// x: rain amount (0 = no rain), y: coverage, z: towers, w: share of active storm cells (same as _CloudRain).
 float4 rain_params;
 // Height of the cloud base, the rain falls below it.
 float rain_base;
@@ -813,9 +812,47 @@ float4 cirrus(float3 cam, float3 ray_dir, float view_length, out float distance_
     return float4(color * opacity, opacity);
 }
 
-// Rain between the ground and the cloud base, 6 samples along the view ray. The density follows the weather map and
-// the storm cells (CloudRain.hlsl), so dark grey curtains hang under the storms. Returns the premultiplied colour and
-// the opacity, and the average distance for the reprojection.
+// Step lengths of the rain curtains in meters: big through dry air, small under the storm cells. Both grow with the
+// distance, far away a pixel covers more anyway.
+float rain_big_step(float t)
+{
+    return max(1200.0, t * 0.06);
+}
+
+float rain_small_step(float t)
+{
+    return max(250.0, t * 0.02);
+}
+
+// How much rain is in the air at p. Under the active storm cells it falls as a column narrower than the cell, in
+// strands, and the light rain between the cells comes in separate patches. in_cell says if p is under an active cell
+// at all, the curtains take small steps there. step_length filters the strands, so neighbouring pixels agree on them
+// and they come out as streaks instead of noise.
+float rain_density(float3 p, float step_length, float map_width, out bool in_cell)
+{
+    // Rain this far below the cloud base left it a bit downwind (the wind is slower lower down), so the columns lean
+    // like the towers do.
+    float2 xz = p.xz + wind_direction.xy * ((rain_base - p.y) * 0.35) - wind_travel.xz;
+    float4 weather = weather_map.SampleLevel(sampler_weather_map, xz / 128000, 0);
+    float2 cell = storm_map.SampleLevel(sampler_storm_map, xz / 128000, 0);
+    float active = saturate((rain_params.w - cell.y) * 8.0);
+    in_cell = cell.x * active > 0.001;
+    float shaft = smoothstep(0.25, 0.75, cell.x) * active;
+    // Light rain under the thickest cloud cover, less of it when the storms take over.
+    float veil = saturate((rain_params.y - weather.r - 0.2) * 3.0) * (1.0 - 0.8 * rain_params.z) * 0.15;
+    // In patches, else it adds up to a grey wall at the horizon. The a channel (cirrus wisps) is evenly spread noise.
+    if (veil > 0) veil *= smoothstep(0.45, 0.75, weather_map.SampleLevel(sampler_weather_map, xz / 24000 + 0.5, 0).a);
+    float rain = rain_params.x * max(shaft, veil);
+    if (rain <= 0) return 0.0;
+    float strands = weather_map.SampleLevel(sampler_weather_map, xz / 4000, log2(max(step_length * map_width / 4000, 1.0))).a;
+    return rain * (0.1 + 1.8 * strands);
+}
+
+// Rain between the ground and the cloud base, marched by step length: big steps through dry air, and when one lands
+// under a storm cell the march goes back to where the last step ended and walks the cell in small steps, until two
+// samples in a row are out of it. Below the cloud base the curtains start a few km out, the rain right around the
+// camera is the streaks in the composite. Returns the premultiplied colour and the opacity, and the average distance
+// for the reprojection.
 float4 rain_curtains(float3 cam, float3 ray, float view_length, float jitter, out float mean_distance)
 {
     mean_distance = 0;
@@ -840,22 +877,55 @@ float4 rain_curtains(float3 cam, float3 ray, float view_length, float jitter, ou
     // Lit mostly by the sky, rain curtains look dark grey against it.
     float3 rain_color = cloud_ambient_color() * 0.7 + cloud_light_color() * 0.02;
     float3 haze_color = procedural_sky(ray);
-    float dt = (t1 - t0) / 6.0;
+    uint map_width, map_height;
+    weather_map.GetDimensions(map_width, map_height);
+    // Below the cloud base the curtains fade in from 2 to 5 km out (sideways, so the same in every direction), and
+    // there is no point marching the part before that.
+    float below = saturate((rain_base - cam.y) / 300.0);
+    float horizontal = length(ray.xz);
+    if (below >= 1.0) t0 = max(t0, 2000.0 / max(horizontal, 1e-4));
+    if (t1 <= t0) return float4(0.0, 0.0, 0.0, 0.0);
     float3 color = float3(0.0, 0.0, 0.0);
     float transmittance = 1.0;
     float2 distance_acc = float2(0.0, 0.0);
-    for (int k = 0; k < 6; k++)
+    // prev: where the part added so far ends, t: the next sample.
+    float prev = t0;
+    float t = t0 + jitter * rain_big_step(t0);
+    bool fine = false;
+    int dry = 0;
+    [loop]
+    for (int i = 0; i < 96 && prev < t1 && transmittance > 0.01; i++)
     {
-        float t = t0 + (k + jitter) * dt;
-        float2 uv = (cam.xz + ray.xz * t - wind_travel.xz) / 128000;
-        float precipitation = cloud_precipitation(weather_map.SampleLevel(sampler_weather_map, uv, 0),
-                                                  storm_map.SampleLevel(sampler_storm_map, uv, 0), rain_params);
-        // Heavy rain lets you see about 1.5 km.
-        float opacity = 1.0 - exp(-precipitation / 1500.0 * dt);
-        float haze = 1.0 - exp(-t / max(horizon_fade, 1.0));
+        float step_length = fine ? rain_small_step(prev) : rain_big_step(prev);
+        float ts = min(t, t1);
+        bool in_cell;
+        float density = rain_density(cam + ray * ts, step_length, (float)map_width, in_cell);
+        if (!fine && in_cell)
+        {
+            fine = true;
+            t = prev + jitter * rain_small_step(prev);
+            continue;
+        }
+        float end = fine ? min(prev + step_length, t1) : ts;
+        float fade = (1.0 - below * (1.0 - smoothstep(2000.0, 5000.0, horizontal * ts))) *
+            (1.0 - smoothstep(45000.0, 60000.0, ts));
+        // The heaviest rain lets you see about 3.5 km.
+        float opacity = (1.0 - exp(-density / 3500.0 * (end - prev))) * fade;
+        float haze = 1.0 - exp(-ts / max(horizon_fade, 1.0));
         color += transmittance * opacity * lerp(rain_color, haze_color, haze);
-        distance_acc += float2(t, 1.0) * (transmittance * opacity);
+        distance_acc += float2(ts, 1.0) * (transmittance * opacity);
         transmittance *= 1.0 - opacity;
+        prev = end;
+        if (fine)
+        {
+            dry = in_cell ? 0 : dry + 1;
+            if (dry >= 2)
+            {
+                fine = false;
+                dry = 0;
+            }
+        }
+        t = prev + (fine ? jitter * rain_small_step(prev) : rain_big_step(prev));
     }
     mean_distance = distance_acc.y > 1e-4 ? distance_acc.x / distance_acc.y : 0.0;
     return float4(color, 1.0 - transmittance);
