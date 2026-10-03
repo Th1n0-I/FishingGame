@@ -121,7 +121,11 @@ static float last_height_frac;
 // Undetailed density of the last get_density() call, 0 means nothing can be there.
 static float last_bound;
 
-int _StepAmount;
+// Raymarch step length in meters up close, how much it grows with the distance (step = max(step_length,
+// distance * step_growth)) and the most samples one pixel may take, big steps included.
+float step_length;
+float step_growth;
+int max_steps;
 
 bool _UseStepSize;
 bool _UseBoundingBox;
@@ -603,8 +607,17 @@ float scattered_light(float shadow_od, float cos_theta)
     return sun_light;
 }
 
-float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogCol, float stepSize, int maxSteps,
-                float viewLength, float transmittance, float2 id, inout float2 depth_acc)
+// Step length at a distance from the camera: Step Length up close, growing with the distance after that. Far away one
+// pixel covers more and the detail has faded out, so long steps there lose nothing, and every ray gets about the same
+// detail per pixel whatever its length.
+float cloud_step_length(float cam_distance)
+{
+    return max(step_length, cam_distance * step_growth);
+}
+
+// steps_left: how many samples this pixel may still take, shared by both parts of a split ray.
+float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogCol, float viewLength, float transmittance,
+                float2 id, inout float2 depth_acc, inout int steps_left)
 {
     float3 light_contribution = cloud_light_color();
     float3 ambient_color = cloud_ambient_color();
@@ -619,12 +632,10 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
     float3 fogColor = fogCol;
     float3 haze_color = procedural_sky(rayDir);
 
-    // Empty space skipping: while nothing is around, only every 3rd step gets sampled, and only for the base shape
-    // (no detail, no light). When that finds something the march goes back to just after the last empty sample and
-    // takes normal steps again, until 4 samples in a row have no base shape either. Every sample sits on the normal
-    // step grid, so inside the clouds nothing changes. The coarse grid gets its own random offset of 0 to 2 steps,
-    // otherwise the same 2 of every 3 steps would never be checked.
-    float phase = jitter;
+    // Empty space skipping: while nothing is around, only every 3rd step gets sampled (a big step), and only for the
+    // base shape (no detail, no light). When that finds something the march goes back to just after the last empty
+    // sample and takes normal steps again, until 4 samples in a row have no base shape either. The big steps start
+    // 0 to 2 normal steps in, at random, otherwise the same 2 of every 3 steps would never be checked.
     uint2 cell = (uint2)id;
     uint hash = (cell.x * 73856093u) ^ (cell.y * 19349663u);
     hash ^= hash >> 13;
@@ -632,21 +643,20 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
     hash ^= hash >> 15;
     int coarse_offset = (int)(hash % 3u);
     bool coarse = empty_space_skipping;
-    int i = coarse ? coarse_offset : 0;
-    int last_empty = -1;
+    // The march goes along startPoint to endPoint, which lies on the camera ray, so the camera distance is
+    // startDist + travelled.
+    float first_step = cloud_step_length(startDist);
+    float travelled = (jitter + (coarse ? coarse_offset : 0)) * first_step;
+    float last_empty = (jitter - 1.0) * first_step;
     int empty_samples = 0;
-    // Every normal step gets taken at most once and the coarse samples come on top of that, twice is plenty.
-    int iterations = 0;
-    int max_iterations = maxSteps * 2;
 
     // Stops at 1% transmittance, what is left behind that can't be seen anyway.
-    while (iterations < max_iterations && transmittance > 0.01)
+    while (steps_left > 0 && transmittance > 0.01 && travelled < maxDist)
     {
-        float distanceTravelled = (i + phase) * stepSize;
-        if (distanceTravelled >= maxDist) break;
-        iterations++;
-        float3 worldPos = startPoint + rayDir * distanceTravelled;
-        float cam_distance = distance(worldPos, camPoint);
+        steps_left--;
+        float3 worldPos = startPoint + rayDir * travelled;
+        float cam_distance = startDist + travelled;
+        float step_size = cloud_step_length(cam_distance);
         float detail_amount = lod_detail(cam_distance);
         float density = get_density(worldPos, detail_amount, coarse);
         if (coarse)
@@ -655,27 +665,24 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
             {
                 coarse = false;
                 empty_samples = 0;
-                i = last_empty + 1;
+                travelled = last_empty + cloud_step_length(startDist + last_empty);
             }
             else
             {
-                last_empty = i;
-                i += 3;
+                last_empty = travelled;
+                travelled += 3.0 * step_size;
             }
             continue;
         }
-        i++;
         if (density <= 0)
         {
-            last_empty = i - 1;
+            last_empty = travelled;
+            travelled += step_size;
             empty_samples = last_bound > 0 ? 0 : empty_samples + 1;
             if (empty_space_skipping && empty_samples >= 4)
             {
-                // Onto the next sample of the coarse grid.
                 coarse = true;
                 empty_samples = 0;
-                uint behind = (uint)(i - coarse_offset) % 3u;
-                if (behind > 0) i += 3 - (int)behind;
             }
             continue;
         }
@@ -689,12 +696,13 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
         // The air in front of far samples gives them the sky's colour, so the horizon fills up with hazy clouds
         // instead of turning see-through (which showed the dark ground from above the clouds).
         float haze = 1.0 - exp(-cam_distance / max(horizon_fade, 1.0));
-        float step_opacity = 1.0 - exp(-density * stepSize);
+        float step_opacity = 1.0 - exp(-density * step_size);
         // Average distance weighted by how much each step shows up in the final pixel.
         depth_acc += float2(cam_distance, 1.0) * (transmittance * step_opacity);
         // Energy conserving integration (Hillaire 2015), looks the same no matter the step size.
         fogColor.rgb += transmittance * step_opacity * lerp(light_contribution * sun_light * powder + ambient, haze_color, haze);
         transmittance *= 1.0 - step_opacity;
+        travelled += step_size;
     }
     return float4(fogColor.rgb, transmittance);
 }
@@ -751,16 +759,15 @@ float4 march_cloud_layer(float3 entryPos, float3 rayDir, float viewLength, float
         }
     }
 
-    int steps = split ? max(_StepAmount >> 1, 1) : _StepAmount;
+    int steps_left = max_steps;
     float3 a0 = entryPos + rayDir * seg0.x;
     float3 b0 = entryPos + rayDir * seg0.y;
-    res = raymarch(a0, b0, entryPos, res.rgb, distance(a0, b0) / steps, steps, viewLength, res.a, jitter_id, depth_acc);
+    res = raymarch(a0, b0, entryPos, res.rgb, viewLength, res.a, jitter_id, depth_acc, steps_left);
     if (split)
     {
         float3 a1 = entryPos + rayDir * seg1.x;
         float3 b1 = entryPos + rayDir * seg1.y;
-        res = raymarch(a1, b1, entryPos, res.rgb, distance(a1, b1) / steps, steps, viewLength, res.a, jitter_id,
-                       depth_acc);
+        res = raymarch(a1, b1, entryPos, res.rgb, viewLength, res.a, jitter_id, depth_acc, steps_left);
     }
     return res;
 }

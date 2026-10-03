@@ -106,7 +106,8 @@ public class NoiseController : MonoBehaviour {
 
 	// What a quality preset sets.
 	private struct QualityValues {
-		public int         stepAmount, textureDivide;
+		public float       stepLength, stepGrowth;
+		public int         maxSteps, textureDivide;
 		public UpscaleMode upscaling;
 		public float       detailDistance;
 	}
@@ -119,7 +120,7 @@ public class NoiseController : MonoBehaviour {
 
 	[Header("Volumetrics")]
 	[Header("-Quality")]
-	[SerializeField, Tooltip("Anything but Custom sets Step Amount, Texture Divide, Temporal Upscaling and Detail Distance when the game starts. F1 to F4 pick Low to Ultra in game, F5 goes back to Custom.")]
+	[SerializeField, Tooltip("Anything but Custom sets Step Length, Step Growth, Max Steps, Texture Divide, Temporal Upscaling and Detail Distance when the game starts. F1 to F4 pick Low to Ultra in game, F5 goes back to Custom.")]
 	private CloudQuality quality = CloudQuality.High;
 	[SerializeField, Tooltip("Takes bigger steps through empty space and only goes back to normal steps near clouds.")]
 	private bool emptySpaceSkipping = true;
@@ -131,7 +132,12 @@ public class NoiseController : MonoBehaviour {
 	private int textureDivide = 2;
 	[SerializeField] private float stepSize            = 1.0f;
 	[SerializeField] private int   firstPassStepAmount = 1;
-	[SerializeField] private int   stepAmount          = 1;
+	[SerializeField, Tooltip("Raymarch step length in meters up close. Smaller is more detail and slower.")]
+	private float stepLength = 40f;
+	[SerializeField, Tooltip("How much the step length grows with the distance: step = max(Step Length, distance * this). Far away one pixel covers more anyway.")]
+	private float stepGrowth = 0.008f;
+	[SerializeField, Tooltip("The most samples one pixel may take, the big steps through empty space included.")]
+	private int maxSteps = 384;
 	[SerializeField] private float maxDist             = 100;
 	[SerializeField] private bool  firstPass;
 	[SerializeField] private bool  useStepSize;
@@ -341,7 +347,9 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int Gradient1                   = Shader.PropertyToID("_Gradient");
 	private static readonly int FbmMult                     = Shader.PropertyToID("_FBMMult");
 	private static readonly int FirstPassStepAmount         = Shader.PropertyToID("_FirstPassStepAmount");
-	private static readonly int StepAmount                  = Shader.PropertyToID("_StepAmount");
+	private static readonly int StepLength                  = Shader.PropertyToID("step_length");
+	private static readonly int StepGrowth                  = Shader.PropertyToID("step_growth");
+	private static readonly int MaxSteps                    = Shader.PropertyToID("max_steps");
 	private static readonly int FirstPass                   = Shader.PropertyToID("_FirstPass");
 	private static readonly int UseStepSize                 = Shader.PropertyToID("_UseStepSize");
 	private static readonly int InvVp                       = Shader.PropertyToID("_InvVP");
@@ -542,7 +550,7 @@ public class NoiseController : MonoBehaviour {
 		if (UnityEngine.Time.unscaledTime > toggleMessageUntil) return;
 		string upscaling = UpscaleFactor > 1 ? UpscaleFactor + "x" + UpscaleFactor : "off";
 		GUI.Label(new Rect(10, Screen.height - 55, 1000, 25),
-		          $"[F1-F4] Quality: {quality} ({Mathf.Max(stepAmount, 1)} steps)   [F5] Custom    [T] Temporal accumulation: {OnOff(temporalEnabled)}    [U] Temporal upscaling: {upscaling}");
+		          $"[F1-F4] Quality: {quality} ({Mathf.Max(stepLength, 1f):0} m steps)   [F5] Custom    [T] Temporal accumulation: {OnOff(temporalEnabled)}    [U] Temporal upscaling: {upscaling}");
 		GUI.Label(new Rect(10, Screen.height - 30, 1000, 25),
 		          $"[K] Empty space skipping: {OnOff(emptySpaceSkipping)}    [L] Light volume: {OnOff(useLightVolume)}    [O] Distance detail fade: {OnOff(detailFade && detailDistance > 0)}    [H] Cirrus: {OnOff(cirrus)}    [B] Lightning strike");
 	}
@@ -572,7 +580,8 @@ public class NoiseController : MonoBehaviour {
 	}
 
 	private QualityValues CurrentQualityValues() => new QualityValues {
-		stepAmount = stepAmount, textureDivide = textureDivide, upscaling = temporalUpscaling, detailDistance = detailDistance
+		stepLength = stepLength, stepGrowth = stepGrowth, maxSteps = maxSteps, textureDivide = textureDivide, upscaling = temporalUpscaling,
+		detailDistance = detailDistance
 	};
 
 	// Sets the preset's values, Custom goes back to the inspector values.
@@ -580,13 +589,16 @@ public class NoiseController : MonoBehaviour {
 		// Remember what Custom was set to (including changes made while on it) when leaving it.
 		if (appliedQuality == CloudQuality.Custom && preset != CloudQuality.Custom) customQuality = CurrentQualityValues();
 		var values = preset switch {
-			CloudQuality.Low    => new QualityValues { stepAmount = 64,  textureDivide = 2, upscaling = UpscaleMode.FourByFour, detailDistance = 15000f },
-			CloudQuality.Medium => new QualityValues { stepAmount = 96,  textureDivide = 2, upscaling = UpscaleMode.TwoByTwo,   detailDistance = 25000f },
-			CloudQuality.High   => new QualityValues { stepAmount = 120, textureDivide = 2, upscaling = UpscaleMode.TwoByTwo,   detailDistance = 35000f },
-			CloudQuality.Ultra  => new QualityValues { stepAmount = 160, textureDivide = 2, upscaling = UpscaleMode.Off,        detailDistance = 0f },
+			// A ray through the cloud layer takes about ln(far / near) / Step Growth steps: roughly 60, 100, 150 and 240.
+			CloudQuality.Low    => new QualityValues { stepLength = 100f, stepGrowth = 0.020f, maxSteps = 160, textureDivide = 2, upscaling = UpscaleMode.FourByFour, detailDistance = 15000f },
+			CloudQuality.Medium => new QualityValues { stepLength = 60f,  stepGrowth = 0.012f, maxSteps = 256, textureDivide = 2, upscaling = UpscaleMode.TwoByTwo,   detailDistance = 25000f },
+			CloudQuality.High   => new QualityValues { stepLength = 40f,  stepGrowth = 0.008f, maxSteps = 384, textureDivide = 2, upscaling = UpscaleMode.TwoByTwo,   detailDistance = 35000f },
+			CloudQuality.Ultra  => new QualityValues { stepLength = 25f,  stepGrowth = 0.005f, maxSteps = 512, textureDivide = 2, upscaling = UpscaleMode.Off,        detailDistance = 0f },
 			_                   => customQuality
 		};
-		stepAmount        = values.stepAmount;
+		stepLength        = values.stepLength;
+		stepGrowth        = values.stepGrowth;
+		maxSteps          = values.maxSteps;
 		textureDivide     = values.textureDivide;
 		temporalUpscaling = values.upscaling;
 		detailDistance    = values.detailDistance;
@@ -1029,7 +1041,9 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetFloat(ShadowWorldSize,   shadowWorldSize);
 			Shader.SetGlobalFloat(WorldSize, shadowWorldSize);
 
-			volumetricsShader.SetInt(StepAmount,  math.max(stepAmount, 1));
+			volumetricsShader.SetFloat(StepLength, Mathf.Max(stepLength, 1f));
+			volumetricsShader.SetFloat(StepGrowth, Mathf.Max(stepGrowth, 0f));
+			volumetricsShader.SetInt(MaxSteps,     Mathf.Max(maxSteps, 1));
 			volumetricsShader.SetInt(PixelOffset, (int)currentPixel);
 			volumetricsShader.SetInt(ShadowSteps, shadowSteps);
 
