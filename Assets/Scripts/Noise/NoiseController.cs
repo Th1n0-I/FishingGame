@@ -292,7 +292,7 @@ public class NoiseController : MonoBehaviour {
 	private float   detailRise;
 
 	private Texture2D stormMap;
-	// The anvils of the most developed storm cells, redrawn every frame by the AnvilMap kernel.
+	// The anvils and tower footprints of the storm cells, redrawn every frame by the AnvilMap kernel.
 	private RenderTexture anvilMap;
 	// The storm cells in cell units of the storm map, for putting lightning where the storms are.
 	private Vector2[,] stormCenters;
@@ -743,14 +743,14 @@ public class NoiseController : MonoBehaviour {
 		stormMap.Apply(false);
 		Shader.SetGlobalTexture(CloudStormMap, stormMap);
 
-		// The cells for the AnvilMap kernel, which draws the anvils (they reach past their grid cell, so they can't go in
-		// the storm map). x + y * cells, like it reads them.
+		// The cells for the AnvilMap kernel, which draws the anvils and the tower footprints (they reach past their grid
+		// cell, so they can't go in the storm map). x + y * cells, like it reads them.
 		var cellData = new Vector4[cells * cells];
 		for (int y = 0; y < cells; y++)
 			for (int x = 0; x < cells; x++)
 				cellData[y * cells + x] = new Vector4(centers[x, y].x, centers[x, y].y, radii[x, y], values[x, y]);
 		volumetricsShader.SetVectorArray(StormCells, cellData);
-		anvilMap = new RenderTexture(256, 256, 0, RenderTextureFormat.RHalf, RenderTextureReadWrite.Linear) {
+		anvilMap = new RenderTexture(256, 256, 0, RenderTextureFormat.RGHalf, RenderTextureReadWrite.Linear) {
 			enableRandomWrite = true,
 			wrapMode          = TextureWrapMode.Repeat,
 			filterMode        = FilterMode.Bilinear,
@@ -1000,8 +1000,7 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetVector(MinBounds, cloudBoxMin);
 			volumetricsShader.SetVector(MaxBounds, cloudBoxMax);
 			volumetricsShader.SetVector(StormParams, new Vector4(towers, hasWeather ? weather.stormCells : 0f, 0, 0));
-			// Only the most developed 60% of the active cells have spread an anvil, more and they merge into one deck.
-			volumetricsShader.SetVector(AnvilParams, new Vector4((hasWeather ? weather.stormCells : 0f) * 0.6f, towers, windDir.x, windDir.y));
+			volumetricsShader.SetVector(AnvilParams, new Vector4(hasWeather ? weather.stormCells : 0f, towers, windDir.x, windDir.y));
 			volumetricsShader.Dispatch(KernelAnvil, anvilMap.width / 8, anvilMap.height / 8, 1);
 
 			// Rain: curtains below the cloud base in the raymarch (rain_density), streaks around the camera in the
