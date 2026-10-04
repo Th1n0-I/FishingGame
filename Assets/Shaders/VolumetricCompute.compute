@@ -5,6 +5,7 @@
 #pragma kernel LightVolume
 
 #include "ProceduralSky.hlsl"
+#include "CloudRain.hlsl"
 
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
@@ -257,8 +258,8 @@ float remap(float v, float inMin, float inMax, float outMin, float outMax)
     return outMin + (v - inMin) / (inMax - inMin) * (outMax - outMin);
 }
 
-// Storm cells, round and not overlapping, over the same 128 km tile as the weather map. r: 1 in the middle of a cell
-// fading to 0 at its edge, g: the cell's random value, which decides if it is active.
+// Storm cells, round and not overlapping, over the same 128 km tile as the weather map (storm_cell bends their outlines).
+// r: 1 in the middle of a cell fading to 0 at its edge, g: the cell's random value, which decides if it is active.
 Texture2D<float2> storm_map;
 SamplerState sampler_storm_map;
 // x: how much the active cells grow into towers (0 = no storms), y: share of the cells that are active.
@@ -268,11 +269,11 @@ float4 rain_params;
 // Height of the cloud base, the rain falls below it.
 float rain_base;
 
-float storm_amount(float2 xz)
+// The storm map at p (world xz minus wind_travel), with the outlines bent so the cells aren't circles (CloudRain.hlsl).
+float2 storm_cell(float2 p)
 {
-    if (storm_params.x <= 0) return 0.0;
-    float2 cell = storm_map.SampleLevel(sampler_storm_map, (xz - wind_travel.xz) / 128000, 0);
-    return storm_params.x * cell.x * saturate((storm_params.y - cell.y) * 8.0);
+    float2 noise = weather_map.SampleLevel(sampler_weather_map, p / 24000, 0).ba;
+    return storm_map.SampleLevel(sampler_storm_map, storm_warp(p, noise) / 128000, 0);
 }
 
 // detail_amount 1 = full detail, 0 = erode by the average detail instead, which skips the detail texture (distance LOD
@@ -350,10 +351,20 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
 
     float4 weather = weather_map.SampleLevel(sampler_weather_map, (worldPos.xz - wind_travel.xz) / 128000, 0);
     float sampled_cloud_type = weather.g * 2;
-    // Storm cells (only when the weather has towers): the clouds there get taller, denser and grow an anvil.
-    float storm = storm_amount(worldPos.xz);
-    float tower = 1.0 + 1.4 * storm;
-    float cell_coverage = saturate(coverage + 0.2 * storm);
+    // Storm cells (only when the weather has towers): a broad tower rises from the cell and an anvil spreads at the top.
+    float2 cell = float2(0.0, 1.0);
+    float active = 0.0;
+    if (storm_params.x > 0)
+    {
+        cell = storm_cell(worldPos.xz - wind_travel.xz);
+        active = saturate((storm_params.y - cell.y) * 8.0);
+    }
+    float storm = storm_params.x * cell.x * active;
+    // The tower height over the cell rises fast at its rim and stays high over the middle, a broad dome. Following the
+    // falloff itself (a bell) grew narrow peaks with round tips.
+    float dome = sqrt(saturate(cell.x / 0.35)) * active * storm_params.x;
+    float tower = 1.0 + 1.4 * dome;
+    float cell_coverage = saturate(coverage + 0.15 * storm);
     float height_frac = 0;
     //float altitude = distance(worldPos, _SphereCenter) - _SphereMinRadius;
     float altitude = worldPos.y;
@@ -408,8 +419,35 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
                                         cumulus_density_lut, sampler_cumulus_density_lut, float2(height_frac, 0.5), t);
     }
     last_height_frac = height_frac;
-    // The anvil: the top of a storm cell spreads out.
-    shapeGradient = max(shapeGradient, storm * 0.7 * smoothstep(0.7, 0.82, height_frac) * (1.0 - smoothstep(0.9, 1.0, height_frac)));
+    if (storm_params.x > 0)
+    {
+        // Towers keep their width a lot further up than cumulus do.
+        float column = 1.0 - smoothstep(0.6, 1.0, height_frac);
+        shapeGradient = lerp(shapeGradient, column, dome * 0.85);
+        // Height in the tallest towers, where the anvil sits.
+        cloud_type cu = unpack(cumulus_floats);
+        float anvil_frac = (altitude - cu.start_altitude) / (cu.height * (1.0 + 1.4 * storm_params.x));
+        bool near_anvil = anvil_frac > 0.65 && anvil_frac < 0.93;
+        if (dome > 0 || near_anvil)
+        {
+            // Billows of their own: the base noise is far too smooth at the size of a tower.
+            float billow = _PerlinTex.SampleLevel(sampler_PerlinTex, (worldPos - wind_travel.xyz) / 12000, 0).a;
+            if (near_anvil)
+            {
+                // The anvil: a flat ceiling over the tallest towers, spread over the whole cell and blown 4.5 km
+                // downwind, so it ends up a lot wider than the tower. Thick next to the tower, thin towards its edges,
+                // with a ragged underside.
+                float2 upwind = storm_cell(worldPos.xz - wind_direction.xy * 4500.0 - wind_travel.xz);
+                float spread = max(cell.x * active, upwind.x * saturate((storm_params.y - upwind.y) * 8.0));
+                float bottom = 0.85 - 0.13 * smoothstep(0.2, 1.0, spread) + 0.2 * (0.68 - billow);
+                float anvil = smoothstep(0.0, 0.3, spread) * storm_params.x * 0.9 *
+                    smoothstep(bottom, bottom + 0.05, anvil_frac) * (1.0 - smoothstep(0.915, 0.93, anvil_frac));
+                shapeGradient = max(shapeGradient, anvil);
+                cell_coverage = max(cell_coverage, saturate(coverage + 0.25 * anvil));
+            }
+            shapeGradient *= 1.0 - dome * 0.35 * (1.0 - smoothstep(0.58, 0.78, billow));
+        }
+    }
 
     if ((1 - cell_coverage) + weather.r >= 1.0) return 0;
     worldPos.xz -= wind_direction.xy * (saturate(height_frac) * wind_shear); // Tops lean downwind.
@@ -424,7 +462,7 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
     base = remap(base, (1 - detail) * detail_fbm_mult, 1.0, 0.0, 1.0);
     base = base * shapeGradient;
     base = saturate(remap(base, saturate((1 - cell_coverage) + weather.r - cloud.coverage), 1.0, 0.0, 1.0));
-    float scale = full_density_mult * cloud.density * densityGradient * (1.0 + 0.5 * storm);
+    float scale = full_density_mult * cloud.density * densityGradient * (1.0 + 1.5 * dome);
     last_bound = base * scale;
     // The detail can only erode, so an empty base stays empty and the detail sample can be skipped.
     if (bound_only || last_bound <= 0) return max(last_bound, 0.0);
@@ -841,7 +879,7 @@ float rain_density(float3 p, float step_length, float map_width, out bool in_cel
     // like the towers do.
     float2 xz = p.xz + wind_direction.xy * ((rain_base - p.y) * 0.35) - wind_travel.xz;
     float4 weather = weather_map.SampleLevel(sampler_weather_map, xz / 128000, 0);
-    float2 cell = storm_map.SampleLevel(sampler_storm_map, xz / 128000, 0);
+    float2 cell = storm_cell(xz);
     float active = saturate((rain_params.w - cell.y) * 8.0);
     in_cell = cell.x * active > 0.001;
     float shaft = smoothstep(0.25, 0.75, cell.x) * active;

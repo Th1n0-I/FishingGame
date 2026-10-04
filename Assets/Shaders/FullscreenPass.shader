@@ -226,9 +226,11 @@ Shader "Custom/VolumetricFog"
                 // Rain in front of everything, where it rains above the camera and only below the cloud base.
                 if (_CloudRain.x > 0)
                 {
-                    float2 uv = (_WorldSpaceCameraPos.xz - _CloudWind.xy) / 128000.0;
-                    float rain = cloud_precipitation(SAMPLE_TEXTURE2D_LOD(weatherTexture, sampler_weatherTexture, uv, 0),
-                                                     SAMPLE_TEXTURE2D_LOD(_CloudStormMap, sampler_CloudStormMap, uv, 0).rg, _CloudRain);
+                    float2 p = _WorldSpaceCameraPos.xz - _CloudWind.xy;
+                    float2 warp_noise = SAMPLE_TEXTURE2D_LOD(weatherTexture, sampler_weatherTexture, p / 24000.0, 0).ba;
+                    float rain = cloud_precipitation(SAMPLE_TEXTURE2D_LOD(weatherTexture, sampler_weatherTexture, p / 128000.0, 0),
+                                                     SAMPLE_TEXTURE2D_LOD(_CloudStormMap, sampler_CloudStormMap,
+                                                                          storm_warp(p, warp_noise) / 128000.0, 0).rg, _CloudRain);
                     rain *= saturate((_CloudRainInfo.x - _WorldSpaceCameraPos.y) / 300.0);
                     if (rain > 0.01)
                     {

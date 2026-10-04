@@ -697,7 +697,8 @@ public class NoiseController : MonoBehaviour {
 
 	// Round storm cells on a jittered 12x12 grid over the weather map's 128 km tile. r: 1 in the middle fading to 0 at the
 	// edge, g: a random value per cell, the shader turns on the cells below the weather's share. The circles stay inside
-	// their grid cell, so they never overlap and the filtering never mixes two cells.
+	// their grid cell, so they never overlap and the filtering never mixes two cells. The shaders bend the outlines
+	// (storm_warp in CloudRain.hlsl), so they don't look round.
 	private void CreateStormMap() {
 		const int size = 256, cells = 12;
 		var random = new System.Random(1234);
@@ -706,7 +707,7 @@ public class NoiseController : MonoBehaviour {
 		var values  = stormValues = new float[cells, cells];
 		for (int y = 0; y < cells; y++) {
 			for (int x = 0; x < cells; x++) {
-				radii[x, y]   = 0.2f + 0.15f * (float)random.NextDouble();
+				radii[x, y]   = 0.3f + 0.15f * (float)random.NextDouble();
 				float room    = 0.5f - radii[x, y];
 				centers[x, y] = new Vector2(x + 0.5f + room * (2f * (float)random.NextDouble() - 1f),
 				                            y + 0.5f + room * (2f * (float)random.NextDouble() - 1f));

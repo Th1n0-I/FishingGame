@@ -14,4 +14,11 @@ float cloud_precipitation(float4 weather, float2 storm_cell, float4 rain)
     return rain.x * max(dense * (1.0 - 0.8 * rain.z), cell);
 }
 
+// Bends the storm cell outlines: moves the storm map lookup at p (world xz minus the wind travel) by up to 2.5 km.
+// noise: the weather map's b and a channels (smooth cirrus noise) sampled at p / 24000.
+float2 storm_warp(float2 p, float2 noise)
+{
+    return p + (noise - 0.5) * 5000.0;
+}
+
 #endif
