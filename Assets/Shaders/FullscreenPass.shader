@@ -112,7 +112,7 @@ Shader "Custom/VolumetricFog"
                 return frac((p.x + p.y) * p.x);
             }
 
-            // Streaks of falling rain on 4 cylinders around the camera, 3 to 37 m out. Being fixed in the world they
+            // Streaks of falling rain on 6 cylinders around the camera, 2.5 to 62 m out. Being fixed in the world they
             // stay put when the camera turns, and anything closer than a cylinder hides its streaks.
             // Returns how much of the pixel the streaks cover.
             float rain_streaks(float3 ray, float scene_distance, float amount)
@@ -123,15 +123,15 @@ Shader "Custom/VolumetricFog"
                 // Wind across the view slants the streaks and carries them sideways.
                 float wind_across = dot(_CloudWind.zw, float2(-ray.z, ray.x) / horizontal);
                 float cover = 0.0;
-                [unroll] for (int layer = 0; layer < 4; layer++)
+                [unroll] for (int layer = 0; layer < 6; layer++)
                 {
-                    float radius = 3.0 * pow(2.3, layer);
+                    float radius = 2.5 * pow(1.9, layer);
                     float t = radius / horizontal;
                     if (t > scene_distance) continue;
                     // A whole number of columns around the cylinder, so there is no seam behind the camera.
-                    float columns = max(round(6.2831853 * radius / (0.3 * (1.0 + layer))), 1.0);
+                    float columns = max(round(6.2831853 * radius / (0.18 * (1.0 + 0.6 * layer))), 1.0);
                     float cell_width = 6.2831853 * radius / columns;
-                    float cell_height = 2.0 * (1.0 + layer);
+                    float cell_height = 1.6 * (1.0 + 0.7 * layer);
                     float height = _WorldSpaceCameraPos.y + ray.y * t;
                     float u = (angle / 6.2831853 + 0.5) * columns - wind_across * _Time.y / cell_width;
                     float v = (height + 9.0 * _Time.y) / cell_height + layer * 0.37;
@@ -140,13 +140,13 @@ Shader "Custom/VolumetricFog"
                     float h = rain_hash(cell + layer * 17.0);
                     // Light rain has drops in fewer cells.
                     if (h > amount) continue;
-                    float along = frac(f.y - frac(h * 7.7)) / 0.4;
+                    float along = frac(f.y - frac(h * 7.7)) / 0.5;
                     if (along > 1.0) continue;
                     float slant = clamp(wind_across * cell_height / (9.0 * cell_width), -0.5, 0.5);
-                    float x = 0.15 + 0.7 * frac(h * 13.1) - along * 0.4 * slant;
-                    // About 1.2 pixels wide on screen, whatever the distance.
-                    float width = max(t * _CloudRainInfo.y * 1.2 / cell_width, 0.005);
-                    cover += saturate(1.0 - abs(f.x - x) / width) * sin(along * 3.14159265) * (1.0 - 0.18 * layer);
+                    float x = 0.15 + 0.7 * frac(h * 13.1) - along * 0.5 * slant;
+                    // About 2.2 pixels wide on screen, whatever the distance.
+                    float width = max(t * _CloudRainInfo.y * 2.2 / cell_width, 0.005);
+                    cover += saturate(1.0 - abs(f.x - x) / width) * sin(along * 3.14159265) * (1.0 - 0.12 * layer);
                 }
                 return saturate(cover);
             }
@@ -237,9 +237,9 @@ Shader "Custom/VolumetricFog"
                         float3 toPixel = ComputeWorldSpacePosition(IN.texcoord, depth, UNITY_MATRIX_I_VP) - _WorldSpaceCameraPos;
                         float sceneDistance = isSky ? 1e9 : length(toPixel);
                         float3 ray = normalize(toPixel);
-                        // Drops catch the light of the sky around them.
-                        float3 rainColor = procedural_sky(float3(ray.x, 0.2, ray.z)) * 0.8;
-                        result = lerp(result, rainColor, rain_streaks(ray, sceneDistance, rain) * 0.35);
+                        // Drops catch the light of the sky around them and show up lighter than what is behind them.
+                        float3 rainColor = max(procedural_sky(float3(ray.x, 0.2, ray.z)) * 1.1, result * 1.35);
+                        result = lerp(result, rainColor, rain_streaks(ray, sceneDistance, rain) * 0.6);
                     }
                 }
 
