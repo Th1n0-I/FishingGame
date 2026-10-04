@@ -4,7 +4,10 @@ from PIL import Image
 import clouds as CL, render as R
 for kv in sys.argv[3:]:
     k, v = kv.split('='); CL.NEWP[k] = float(v)
+# STORM=storm (towers 1, cells 0.55) or cloudy (towers 0.35, cells 0.25), the WeatherSystem presets.
 P = dict(R.PRESETS['storm'], density=1.5, visibility=0.6, coverage=float(os.environ.get('COV', 0.75)))
+if os.environ.get('STORM') == 'cloudy':
+    P.update(towers=0.35, cells=0.25, density=1.1)
 CL.ANVIL = CL.anvil_map(P, reach=CL.NEWP['reach'], stretch=CL.NEWP['stretch'], shift=CL.NEWP['shift'],
                         tower_min=CL.NEWP['tower_min'], tower_grow=CL.NEWP['tower_grow'])
 rows = []

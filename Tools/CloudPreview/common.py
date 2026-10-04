@@ -56,7 +56,7 @@ def storm_map(r_min=0.2, r_span=0.15):
     values = np.zeros((cells, cells))
     for y in range(cells):
         for x in range(cells):
-            radii[x, y] = 0.2 + 0.15 * rnd.next_double()
+            radii[x, y] = r_min + r_span * rnd.next_double()
             room = 0.5 - radii[x, y]
             cx = x + 0.5 + room * (2 * rnd.next_double() - 1)
             cy = y + 0.5 + room * (2 * rnd.next_double() - 1)
@@ -250,3 +250,19 @@ def sample_trilinear(mips, uv, lod):
         b = sample_wrap(mips[min(level + 1, len(mips) - 1)], uv[m])
         out[m] = a * (1 - f[m]) + b * f[m]
     return out
+
+
+WARP_SCALE, WARP_AMPLITUDE, WARP_MIP = 24000.0, 2500.0, 5
+_warp_mips = None
+
+
+def storm_warp_uv(xz):
+    """storm_uv() in VolumetricCompute / storm_warp() in CloudRain.hlsl: the storm maps' uv at xz (world minus wind
+    travel), bent by the weather map's b and a channels at mip 5 (smooth, so the bend never folds over)."""
+    global _warp_mips
+    if _warp_mips is None:
+        w = weather_map()
+        _warp_mips = (mip_chain(w[..., 2])[WARP_MIP], mip_chain(w[..., 1])[WARP_MIP])
+    uv = xz / WARP_SCALE
+    noise = np.stack([sample_wrap(_warp_mips[0], uv), sample_wrap(_warp_mips[1], uv)], -1)
+    return (xz + (noise - 0.5) * WARP_AMPLITUDE) / TILE

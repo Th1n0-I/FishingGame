@@ -104,22 +104,24 @@ def remap(v, a, b, c, d):
 NEWP = dict(warp=2500.0, warp_size=24000.0, core_lo=0.35, core_hi=0.8, tower=1.4, col_lo=0.5, cov_boost=0.15, dens=1.5,
             lump_size=12000.0, lump_amt=0.7, anvil_shift=5000.0, anvil_lo=0.0, anvil_hi=0.3, anvil_bottom=0.78,
             anvil_top=0.95, anvil_amt=0.85, widen=0.3, wedge=0.6, anvil_cov=0.1, billow=0.9, billow_size=9000.0,
-            dome_w=0.35, col_mix=0.5, rag=0.3, anvil_thin=0.06, a_thin=0.88, a_thick=0.16, a_cov=0.3, cov_dome=0.0, col_mix2=0.85, reach=2.5, stretch=1.5, shift=0.3, tower_min=0.9, tower_grow=0.8, col_top=0.6)
-STORM_BIG, BIG_CENTERS, BIG_VALUES = C.storm_map(0.3, 0.15)
+            dome_w=0.5, col_mix=0.5, rag=0.3, anvil_thin=0.06, a_thin=0.8, a_thick=0.22, a_cov=0.4, cov_dome=0.15, col_mix2=1.0, reach=2.5, stretch=1.5, shift=0.3, tower_min=1.2, tower_grow=1.0, col_top=0.8)
+STORM_BIG, BIG_CENTERS, BIG_VALUES = C.storm_map(0.2, 0.15)
 BIG_RADII = C.LAST_RADII
 BIG_EXTRAS = C.LAST_EXTRAS
 
 
 def anvil_map(P, size=256, **_):
-    """Port of the AnvilMap kernel. x: anvil, y: where the towers stand (dome), z: their height, w: the anvil's height."""
+    """Port of the AnvilMap kernel. x: anvil spread, y: where the towers stand (times the weather's towers), z: their
+    height, w: the height of the anvil's storm (blended between neighbouring anvils)."""
     cells = 12
     py, px = np.mgrid[0:size, 0:size]
     p = np.stack([(px + 0.5) / size * cells, (py + 0.5) / size * cells], -1)
     g = np.floor(p).astype(int)
     out = np.zeros((size, size, 4), np.float32)
+    hsum = np.zeros((size, size)); wsum = np.zeros((size, size))
     along = WIND_DIR / np.linalg.norm(WIND_DIR)
     across = np.array([-along[1], along[0]])
-    share = P['cells']
+    share, towers = P['cells'], P['towers']
     for dy in range(-2, 3):
         for dx in range(-2, 3):
             cx = g[..., 0] + dx
@@ -128,9 +130,9 @@ def anvil_map(P, size=256, **_):
             centre = BIG_CENTERS[ix, iy] + np.stack([cx - ix, cy - iy], -1)
             value = BIG_VALUES[ix, iy]
             extra = BIG_EXTRAS[ix, iy]
-            act = np.clip((share - value) * 8.0, 0, 1) * P['towers']
+            act = np.clip((share - value) * 8.0, 0, 1)
             maturity = np.clip((share - value) / max(share, 1e-3), 0, 1)
-            height = act * (0.3 + 0.7 * smoothstep(0.0, 0.8, maturity)) * (0.75 + 0.25 * extra[..., 0])
+            height = towers * act * (0.3 + 0.7 * smoothstep(0.0, 0.8, maturity)) * (0.75 + 0.25 * extra[..., 0])
             radius = BIG_RADII[ix, iy] * (1.2 + maturity)
             angle = extra[..., 1] * 6.2831853
             flank = np.stack([np.cos(angle), np.sin(angle)], -1)
@@ -141,15 +143,17 @@ def anvil_map(P, size=256, **_):
                 if t > 0:
                     f = np.where(flanked, f, 0)
                 d = np.sqrt(np.clip(f / 0.5, 0, 1))
-                out[..., 1] = np.maximum(out[..., 1], d)
+                out[..., 1] = np.maximum(out[..., 1], d * towers)
                 out[..., 2] = np.maximum(out[..., 2], d * height * hs)
             r = BIG_RADII[ix, iy] * 2.5
             q = p - (centre + along * (r * 0.3)[..., None])
             dd = np.sqrt((q @ along / (r * 1.5)) ** 2 + (q @ across / r) ** 2)
-            spread = np.clip(1 - dd, 0, 1) * act * smoothstep(0.15, 0.4, maturity)
-            win = spread > out[..., 0]
-            out[..., 3] = np.where(win, height, out[..., 3])
-            out[..., 0] = np.maximum(out[..., 0], spread)
+            developed = act * smoothstep(0.15, 0.4, maturity)
+            out[..., 0] = np.maximum(out[..., 0], np.clip(1 - dd, 0, 1) * developed)
+            own = np.clip(1.3 - dd, 0, 1) ** 4 * developed
+            hsum += own * height
+            wsum += own
+    out[..., 3] = np.where(wsum > 1e-5, hsum / np.maximum(wsum, 1e-5), 0)
     return out
 
 
@@ -157,11 +161,9 @@ ANVIL = None
 MATURE = 0.6
 
 
-def storm_cell(xz, N):
-    """Storm map lookup with the outlines pushed around, so the cells aren't circles."""
-    uv = xz / N['warp_size']
-    warp = np.stack([C.sample_wrap(R.PATCHES, uv), C.sample_wrap(R.WISPS, uv)], -1) - 0.5
-    return C.sample_wrap(STORM_BIG, (xz + warp * 2 * N['warp']) / C.TILE)
+def storm_cell(xz, N=None):
+    """The storm map through the bent lookup (storm_cell in VolumetricCompute)."""
+    return C.sample_wrap(STORM_BIG, C.storm_warp_uv(xz))
 
 
 def density(p, P, version, N=NEWP):
@@ -181,8 +183,7 @@ def density(p, P, version, N=NEWP):
         dens_boost = 0.5 * storm
     else:
         # Mirrors get_density() in VolumetricCompute.compute line by line.
-        uvw = xz + (np.stack([C.sample_wrap(R.PATCHES, xz / 24000.0), C.sample_wrap(R.WISPS, xz / 24000.0)], -1) - 0.5) * 5000.0
-        shapes = C.sample_wrap(ANVIL, uvw / C.TILE)
+        shapes = C.sample_wrap(ANVIL, C.storm_warp_uv(xz))
         dome = shapes[..., 1]
         tower = 1 + 1.4 * shapes[..., 2]
         cov = np.clip(P['coverage'] + 0.2 * dome, 0, 1)
@@ -191,13 +192,13 @@ def density(p, P, version, N=NEWP):
         column = 1 - smoothstep(N['col_top'], 1.0, hf)
         shape = shape + (column - shape) * (dome * N['col_mix2'])
         af = (y - BASE) / (HEIGHT * (1 + 1.4 * shapes[..., 3]))
-        near_anvil = (af > 0.65) & (af < 0.93) & (shapes[..., 0] > 0)
+        near_anvil = (af > 0.5) & (af < 0.93) & (shapes[..., 0] > 0)
         billow = sample3d(PERLIN, np.stack([xz[..., 0] / 12000.0, y / 12000.0, xz[..., 1] / 12000.0], -1))[..., 3]
         spread = shapes[..., 0]
         # The anvil: a wide flat plate under the tops of the tallest towers, thin out to its edges, thicker over the
         # towers, with a ragged underside.
         bottom = N['a_thin'] - N['a_thick'] * smoothstep(0.3, 1.0, spread) + 0.2 * (0.68 - billow)
-        anvil = smoothstep(0.0, 0.15, spread) * 0.9 * smoothstep(bottom, bottom + 0.04, af) * (1 - smoothstep(0.915, 0.93, af))
+        anvil = smoothstep(0.0, 0.15, spread) * 0.9 * smoothstep(0.4, 0.8, P['towers']) * smoothstep(bottom, bottom + 0.04, af) * (1 - smoothstep(0.915, 0.93, af))
         anvil = np.where(near_anvil, anvil, 0)
         shape = np.maximum(shape, anvil)
         cov = np.maximum(cov, np.clip(P['coverage'] + N['a_cov'] * anvil, 0, 1))
@@ -217,7 +218,7 @@ def density(p, P, version, N=NEWP):
 
 
 def active_cell_big(P, k):
-    _, centers, values = C.storm_map(0.3, 0.15)
+    _, centers, values = C.storm_map(0.2, 0.15)
     idx = np.argwhere(values < P['cells'] * 0.5)
     x, y = idx[k]
     return centers[x, y] / 12 * C.TILE

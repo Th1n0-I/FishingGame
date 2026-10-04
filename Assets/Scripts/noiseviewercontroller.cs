@@ -66,7 +66,7 @@ public class noiseviewercontroller : MonoBehaviour {
 				sliceMat.SetFloat("_UseFlat", 0);
 
 				image.texture = null;
-			} else {
+			} else if (sliceMat) {
 				// Through the slice material too, which shows it without its alpha. The weather map's alpha holds the
 				// cirrus wisps, which made the preview see-through.
 				image.material = sliceMat;
@@ -74,6 +74,9 @@ public class noiseviewercontroller : MonoBehaviour {
 				sliceMat.SetFloat("_UseFlat", 1);
 
 				image.texture = null;
+			} else {
+				image.material = null;
+				image.texture  = newTex;
 			}
 			image.SetAllDirty();
 		}

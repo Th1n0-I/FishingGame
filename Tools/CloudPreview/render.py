@@ -89,7 +89,7 @@ NEW = dict(start=2000.0, start_full=5000.0, visibility=1500.0, lean=0.35, core_l
 WISP_MIPS = C.mip_chain(WISPS)
 # The game's storm cells (bigger, bent outlines). False gives the cells from before the cumulonimbus work.
 BIG_CELLS = True
-STORM_BIG = C.storm_map(0.3, 0.15)[0]
+STORM_BIG = C.storm_map(0.2, 0.15)[0]
 
 
 def rain_density(p3, P, N, step):
@@ -97,8 +97,7 @@ def rain_density(p3, P, N, step):
     xz = p3[..., [0, 2]] + WIND * ((BASE - p3[..., 1]) * N['lean'])[..., None]
     w = C.sample_wrap(WEATHER, xz / C.TILE)
     if BIG_CELLS:
-        warp = np.stack([C.sample_wrap(PATCHES, xz / 24000.0), C.sample_wrap(WISPS, xz / 24000.0)], -1) - 0.5
-        s = C.sample_wrap(STORM_BIG, (xz + warp * 5000.0) / C.TILE)
+        s = C.sample_wrap(STORM_BIG, C.storm_warp_uv(xz))
     else:
         s = C.sample_wrap(STORM, xz / C.TILE)
     active = np.clip((P['cells'] - s[..., 1]) * 8.0, 0, 1)

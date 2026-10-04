@@ -39,7 +39,7 @@ Shader "Custom/VolumetricFog"
             float _CloudHazeDistance;
             static const float _ShadowStrength = 0.4;
 
-            // Rain around the camera, set by NoiseController. See CloudRain.hlsl for _CloudRain.
+            // Rain around the camera, set by NoiseController. See rain_amount in CloudRain.hlsl for _CloudRain.
             TEXTURE2D(weatherTexture);
             SAMPLER(sampler_weatherTexture);
             TEXTURE2D(_CloudStormMap);
@@ -239,11 +239,16 @@ Shader "Custom/VolumetricFog"
                 // Rain in front of everything, where it rains above the camera and only below the cloud base.
                 if (_CloudRain.x > 0)
                 {
-                    float2 p = _WorldSpaceCameraPos.xz - _CloudWind.xy;
-                    float2 warp_noise = SAMPLE_TEXTURE2D_LOD(weatherTexture, sampler_weatherTexture, p / 24000.0, 0).ba;
-                    float rain = cloud_precipitation(SAMPLE_TEXTURE2D_LOD(weatherTexture, sampler_weatherTexture, p / 128000.0, 0),
-                                                     SAMPLE_TEXTURE2D_LOD(_CloudStormMap, sampler_CloudStormMap,
-                                                                          storm_warp(p, warp_noise) / 128000.0, 0).rg, _CloudRain);
+                    // The rain falling on the camera, leaning with the wind like the curtains (CloudRain.hlsl).
+                    float2 windDir = dot(_CloudWind.zw, _CloudWind.zw) > 1e-6 ? normalize(_CloudWind.zw) : float2(0.0, 0.0);
+                    float2 p = _WorldSpaceCameraPos.xz + windDir * ((_CloudRainInfo.x - _WorldSpaceCameraPos.y) * 0.35) - _CloudWind.xy;
+                    float2 warp_noise = SAMPLE_TEXTURE2D_LOD(weatherTexture, sampler_weatherTexture, p / STORM_WARP_SCALE, STORM_WARP_MIP).ba;
+                    float patches = SAMPLE_TEXTURE2D_LOD(weatherTexture, sampler_weatherTexture, p / 24000.0 + 0.5, 0).a;
+                    bool underCell;
+                    float rain = rain_amount(SAMPLE_TEXTURE2D_LOD(weatherTexture, sampler_weatherTexture, p / 128000.0, 0),
+                                             SAMPLE_TEXTURE2D_LOD(_CloudStormMap, sampler_CloudStormMap,
+                                                                  storm_warp(p, warp_noise) / 128000.0, 0).rg,
+                                             patches, _CloudRain, 1.0, underCell);
                     rain *= saturate((_CloudRainInfo.x - _WorldSpaceCameraPos.y) / 300.0);
                     if (rain > 0.01)
                     {

@@ -715,7 +715,7 @@ public class NoiseController : MonoBehaviour {
 		var values  = stormValues = new float[cells, cells];
 		for (int y = 0; y < cells; y++) {
 			for (int x = 0; x < cells; x++) {
-				radii[x, y]   = 0.3f + 0.15f * (float)random.NextDouble();
+				radii[x, y]   = 0.2f + 0.15f * (float)random.NextDouble();
 				float room    = 0.5f - radii[x, y];
 				centers[x, y] = new Vector2(x + 0.5f + room * (2f * (float)random.NextDouble() - 1f),
 				                            y + 0.5f + room * (2f * (float)random.NextDouble() - 1f));
@@ -1007,11 +1007,14 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetVector(MinBounds, cloudBoxMin);
 			volumetricsShader.SetVector(MaxBounds, cloudBoxMax);
 			volumetricsShader.SetVector(StormParams, new Vector4(towers, hasWeather ? weather.stormCells : 0f, 0, 0));
-			volumetricsShader.SetVector(AnvilParams, new Vector4(hasWeather ? weather.stormCells : 0f, towers, windDir.x, windDir.y));
-			volumetricsShader.Dispatch(KernelAnvil, anvilMap.width / 8, anvilMap.height / 8, 1);
+			// get_density only reads the anvil map when there are towers.
+			if (towers > 0) {
+				volumetricsShader.SetVector(AnvilParams, new Vector4(hasWeather ? weather.stormCells : 0f, towers, windDir.x, windDir.y));
+				volumetricsShader.Dispatch(KernelAnvil, anvilMap.width / 8, anvilMap.height / 8, 1);
+			}
 
-			// Rain: curtains below the cloud base in the raymarch (rain_density), streaks around the camera in the
-			// composite (CloudRain.hlsl). Both use the same weather values.
+			// Rain: curtains below the cloud base in the raymarch, streaks around the camera in the composite. Both
+			// use the same weather values and rain_amount (CloudRain.hlsl).
 			var rainParams = new Vector4(hasWeather ? weather.rain : 0f, hasWeather ? weather.coverage : cloudCoverage, towers,
 			                             hasWeather ? weather.stormCells : 0f);
 			volumetricsShader.SetVector(RainParams, rainParams);
