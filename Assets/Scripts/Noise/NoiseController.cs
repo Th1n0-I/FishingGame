@@ -453,6 +453,7 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int AnvilMapID                  = Shader.PropertyToID("anvil_map");
 	private static readonly int AnvilMapOut                 = Shader.PropertyToID("anvil_map_out");
 	private static readonly int StormCells                  = Shader.PropertyToID("storm_cells");
+	private static readonly int StormCellsExtra             = Shader.PropertyToID("storm_cells_extra");
 	private static readonly int AnvilParams                 = Shader.PropertyToID("anvil_params");
 	private static readonly int StormParams                 = Shader.PropertyToID("storm_params");
 	private static readonly int RainParams                  = Shader.PropertyToID("rain_params");
@@ -745,12 +746,18 @@ public class NoiseController : MonoBehaviour {
 
 		// The cells for the AnvilMap kernel, which draws the anvils and the tower footprints (they reach past their grid
 		// cell, so they can't go in the storm map). x + y * cells, like it reads them.
-		var cellData = new Vector4[cells * cells];
-		for (int y = 0; y < cells; y++)
-			for (int x = 0; x < cells; x++)
-				cellData[y * cells + x] = new Vector4(centers[x, y].x, centers[x, y].y, radii[x, y], values[x, y]);
-		volumetricsShader.SetVectorArray(StormCells, cellData);
-		anvilMap = new RenderTexture(256, 256, 0, RenderTextureFormat.RGHalf, RenderTextureReadWrite.Linear) {
+		// The extra random values (height, flanking line) are drawn after all the others, so the cells stay where they were.
+		var cellData  = new Vector4[cells * cells];
+		var cellExtra = new Vector4[cells * cells];
+		for (int y = 0; y < cells; y++) {
+			for (int x = 0; x < cells; x++) {
+				cellData[y * cells + x]  = new Vector4(centers[x, y].x, centers[x, y].y, radii[x, y], values[x, y]);
+				cellExtra[y * cells + x] = new Vector4((float)random.NextDouble(), (float)random.NextDouble(), (float)random.NextDouble(), 0);
+			}
+		}
+		volumetricsShader.SetVectorArray(StormCells,      cellData);
+		volumetricsShader.SetVectorArray(StormCellsExtra, cellExtra);
+		anvilMap = new RenderTexture(256, 256, 0, RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Linear) {
 			enableRandomWrite = true,
 			wrapMode          = TextureWrapMode.Repeat,
 			filterMode        = FilterMode.Bilinear,

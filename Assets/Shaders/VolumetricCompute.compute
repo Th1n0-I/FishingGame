@@ -270,13 +270,16 @@ float4 rain_params;
 // Height of the cloud base, the rain falls below it.
 float rain_base;
 
-// The shapes of the storm clouds, drawn by the AnvilMap kernel over the same tile as the storm map. x: the anvils of the
-// most developed cells, y: the tower footprints of all active cells.
-Texture2D<float2> anvil_map;
-RWTexture2D<float2> anvil_map_out;
+// The shapes of the storm clouds, drawn by the AnvilMap kernel over the same tile as the storm map. x: the anvils,
+// y: where the towers stand (0 to 1, rising at their rim), z: how tall they are there (0 to 1 of the extra 1.4 cumulus
+// heights), w: the height of the storm the anvil belongs to.
+Texture2D<float4> anvil_map;
+RWTexture2D<float4> anvil_map_out;
 SamplerState sampler_linear_repeat;
 // Every storm cell: xy its centre and z its radius in grid cells, w its random value (the same as the storm map's g).
 float4 storm_cells[144];
+// More random values per cell, 0 to 1. x: its height, y: the direction of its flanking line, z: below 0.7 it has one.
+float4 storm_cells_extra[144];
 // x: share of the cells that are active (as storm_params.y), y: towers, zw: the wind direction.
 float4 anvil_params;
 
@@ -369,20 +372,17 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
     float4 weather = weather_map.SampleLevel(sampler_weather_map, (worldPos.xz - wind_travel.xz) / 128000, 0);
     float sampled_cloud_type = weather.g * 2;
     // Storm cells (only when the weather has towers): a broad tower rises from the cell and an anvil spreads at the top.
-    // x: anvil, y: tower footprint (see AnvilMap).
-    float2 storm_shapes = float2(0.0, 0.0);
+    // x: anvil, y: where the towers stand, z: their height, w: the anvil's storm height (see AnvilMap).
+    float4 storm_shapes = float4(0.0, 0.0, 0.0, 0.0);
     float2 storm_tex_uv = float2(0.0, 0.0);
     if (storm_params.x > 0)
     {
         storm_tex_uv = storm_uv(worldPos.xz - wind_travel.xz);
         storm_shapes = anvil_map.SampleLevel(sampler_linear_repeat, storm_tex_uv, 0);
     }
-    float storm = storm_shapes.y;
-    // The tower height over its footprint rises at the rim and stays high over the inner half, a wide body with
-    // rounded shoulders. Following a falloff (a bell) grew narrow peaks with round tips.
-    float dome = sqrt(saturate(storm / 0.5));
-    float tower = 1.0 + 1.4 * dome;
-    float cell_coverage = saturate(coverage + 0.15 * storm + 0.15 * dome);
+    float dome = storm_shapes.y;
+    float tower = 1.0 + 1.4 * storm_shapes.z;
+    float cell_coverage = saturate(coverage + 0.2 * dome);
     float height_frac = 0;
     //float altitude = distance(worldPos, _SphereCenter) - _SphereMinRadius;
     float altitude = worldPos.y;
@@ -442,10 +442,10 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
         // Towers keep their full width up to 80% of their height and then round off, a blunt top.
         float column = 1.0 - smoothstep(0.8, 1.0, height_frac);
         shapeGradient = lerp(shapeGradient, column, dome);
-        // Height in the tallest towers, where the anvil sits.
+        // Height in the tallest tower of the anvil's storm, the anvil sits near its top.
         cloud_type cu = unpack(cumulus_floats);
-        float anvil_frac = (altitude - cu.start_altitude) / (cu.height * (1.0 + 1.4 * storm_params.x));
-        bool near_anvil = anvil_frac > 0.65 && anvil_frac < 0.93;
+        float anvil_frac = (altitude - cu.start_altitude) / (cu.height * (1.0 + 1.4 * storm_shapes.w));
+        bool near_anvil = anvil_frac > 0.65 && anvil_frac < 0.93 && storm_shapes.x > 0;
         if (dome > 0 || near_anvil)
         {
             // Billows of their own: the base noise is far too smooth at the size of a tower.
@@ -455,11 +455,11 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
                 // The anvil: a wide flat plate just under the tops of the tallest towers (they poke through it), thin
                 // out to its edges, thicker over the towers, with a ragged underside.
                 float spread = storm_shapes.x;
-                float bottom = 0.88 - 0.16 * smoothstep(0.3, 1.0, spread) + 0.2 * (0.68 - billow);
+                float bottom = 0.8 - 0.22 * smoothstep(0.3, 1.0, spread) + 0.2 * (0.68 - billow);
                 float anvil = smoothstep(0.0, 0.15, spread) * 0.9 *
                     smoothstep(bottom, bottom + 0.04, anvil_frac) * (1.0 - smoothstep(0.915, 0.93, anvil_frac));
                 shapeGradient = max(shapeGradient, anvil);
-                cell_coverage = max(cell_coverage, saturate(coverage + 0.3 * anvil));
+                cell_coverage = max(cell_coverage, saturate(coverage + 0.4 * anvil));
             }
             shapeGradient *= 1.0 - dome * 0.35 * (1.0 - smoothstep(0.58, 0.78, billow));
         }
@@ -1044,10 +1044,11 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 // Draws the storm clouds' shapes into anvil_map, over the storm map's 128 km tile (12x12 grid cells). They reach past
 // their grid cell, so neighbouring ones overlap, which the cells in the storm map can't. Runs every frame, the weather
 // and the wind change it.
-// x: the anvils, an ellipse 2.5 times the cell's radius, 1.5 times as long along the wind and moved downwind. Only the
-// more developed half of the active cells has one, more and they merge into a single deck.
-// y: the tower footprints, round, 1.2 times the cell's radius for a cell that just became active up to 2.2 times for
-// the most developed ones, so the towers are as wide as they are tall and don't all look the same.
+// A storm grows with its maturity (0 for a cell that just became active, 1 for the most developed one): its towers get
+// wider (1.2 to 2.2 times the cell's radius) and taller, from a congestus at 0.3 to a cumulonimbus, each storm to its own
+// height. Most have a flanking line of two smaller, lower towers stepping down from the main one, so a storm is a
+// cluster with uneven tops instead of one round drum. The anvil comes on as the storm gets tall: an ellipse 2.5 times
+// the cell's radius, 1.5 times as long along the wind and moved downwind.
 [numthreads(8,8,1)]
 void AnvilMap(uint3 id : SV_DispatchThreadID)
 {
@@ -1058,26 +1059,46 @@ void AnvilMap(uint3 id : SV_DispatchThreadID)
     int2 grid = (int2)floor(p);
     float2 along = anvil_params.zw;
     float2 across = float2(-along.y, along.x);
-    float2 result = float2(0.0, 0.0);
+    float4 result = float4(0.0, 0.0, 0.0, 0.0);
     float share = anvil_params.x;
-    // An anvil reaches at most 2.5 * 0.45 * 1.5 + 0.3 * 1.125 grid cells (about 2), so the 5x5 cells around are enough.
+    // A flanking tower reaches at most (1.35 + 0.42) * 2.2 * 0.45 grid cells and an anvil 2.5 * 0.45 * 1.5 + 0.3 * 1.125
+    // (both under 2), so the 5x5 cells around are enough.
     for (int dy = -2; dy <= 2; dy++)
     {
         for (int dx = -2; dx <= 2; dx++)
         {
             int2 c = grid + int2(dx, dy);
-            int2 wrapped = (c % 12 + 12) % 12;
-            float4 cell = storm_cells[wrapped.y * 12 + wrapped.x];
+            // c is at least -2, so + 24 keeps it positive for the unsigned modulo.
+            int2 wrapped = (int2)((uint2)(c + 24) % 12u);
+            int index = wrapped.y * 12 + wrapped.x;
+            float4 cell = storm_cells[index];
+            float4 extra = storm_cells_extra[index];
             float activity = saturate((share - cell.w) * 8.0) * anvil_params.y;
-            // 0 for a cell that just became active, 1 for the most developed one.
             float maturity = saturate((share - cell.w) / max(share, 1e-3));
+            float storm_height = activity * (0.3 + 0.7 * smoothstep(0.0, 0.8, maturity)) * (0.75 + 0.25 * extra.x);
+            float radius = cell.z * (1.2 + maturity);
             float2 centre = cell.xy + (float2)(c - wrapped);
-            float tower_radius = cell.z * (1.2 + maturity);
-            result.y = max(result.y, saturate(1.0 - length(p - centre) / tower_radius) * activity);
+            float angle = extra.y * 6.2831853;
+            float2 flank = float2(cos(angle), sin(angle));
+            int tower_count = extra.z < 0.7 ? 3 : 1;
+            for (int t = 0; t < tower_count; t++)
+            {
+                // The main tower, then the flanking ones, smaller and lower the further out they are.
+                float offset = t == 0 ? 0.0 : (t == 1 ? 0.75 : 1.35);
+                float size = t == 0 ? 1.0 : (t == 1 ? 0.6 : 0.42);
+                float lower = t == 0 ? 1.0 : (t == 1 ? 0.75 : 0.5);
+                float footprint = saturate(1.0 - length(p - centre - flank * (radius * offset)) / (radius * size)) * activity;
+                // Rises at the rim and stays high over the inner half: wide bodies with rounded shoulders.
+                float rise = sqrt(saturate(footprint / 0.5));
+                result.y = max(result.y, rise);
+                result.z = max(result.z, rise * storm_height * lower);
+            }
             float r = cell.z * 2.5;
             float2 q = p - (centre + along * (r * 0.3));
             float d = length(float2(dot(q, along) / (r * 1.5), dot(q, across) / r));
-            result.x = max(result.x, saturate(1.0 - d) * activity * smoothstep(0.35, 0.6, maturity));
+            float spread = saturate(1.0 - d) * activity * smoothstep(0.15, 0.4, maturity);
+            if (spread > result.x) result.w = storm_height;
+            result.x = max(result.x, spread);
         }
     }
     anvil_map_out[id.xy] = result;
