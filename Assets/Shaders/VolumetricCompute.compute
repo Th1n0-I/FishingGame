@@ -3,6 +3,7 @@
 #pragma kernel Resolve
 #pragma kernel CloudsShadows
 #pragma kernel LightVolume
+#pragma kernel AnvilMap
 
 #include "ProceduralSky.hlsl"
 #include "CloudRain.hlsl"
@@ -269,11 +270,26 @@ float4 rain_params;
 // Height of the cloud base, the rain falls below it.
 float rain_base;
 
-// The storm map at p (world xz minus wind_travel), with the outlines bent so the cells aren't circles (CloudRain.hlsl).
-float2 storm_cell(float2 p)
+// The anvils of the most developed storm cells, drawn by the AnvilMap kernel over the same tile as the storm map.
+Texture2D<float> anvil_map;
+RWTexture2D<float> anvil_map_out;
+SamplerState sampler_linear_repeat;
+// Every storm cell: xy its centre and z its radius in grid cells, w its random value (the same as the storm map's g).
+float4 storm_cells[144];
+// x: the share of the cells that have an anvil, y: towers, zw: the wind direction.
+float4 anvil_params;
+
+// The uv of the storm maps at p (world xz minus wind_travel), with the outlines bent so the cells aren't circles
+// (CloudRain.hlsl).
+float2 storm_uv(float2 p)
 {
     float2 noise = weather_map.SampleLevel(sampler_weather_map, p / 24000, 0).ba;
-    return storm_map.SampleLevel(sampler_storm_map, storm_warp(p, noise) / 128000, 0);
+    return storm_warp(p, noise) / 128000;
+}
+
+float2 storm_cell(float2 p)
+{
+    return storm_map.SampleLevel(sampler_storm_map, storm_uv(p), 0);
 }
 
 // detail_amount 1 = full detail, 0 = erode by the average detail instead, which skips the detail texture (distance LOD
@@ -353,18 +369,20 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
     float sampled_cloud_type = weather.g * 2;
     // Storm cells (only when the weather has towers): a broad tower rises from the cell and an anvil spreads at the top.
     float2 cell = float2(0.0, 1.0);
+    float2 storm_tex_uv = float2(0.0, 0.0);
     float active = 0.0;
     if (storm_params.x > 0)
     {
-        cell = storm_cell(worldPos.xz - wind_travel.xz);
+        storm_tex_uv = storm_uv(worldPos.xz - wind_travel.xz);
+        cell = storm_map.SampleLevel(sampler_storm_map, storm_tex_uv, 0);
         active = saturate((storm_params.y - cell.y) * 8.0);
     }
     float storm = storm_params.x * cell.x * active;
-    // The tower height over the cell rises fast at its rim and stays high over the middle, a broad dome. Following the
+    // The tower height over the cell rises right at its rim and stays high over the rest, a broad trunk. Following the
     // falloff itself (a bell) grew narrow peaks with round tips.
-    float dome = sqrt(saturate(cell.x / 0.35)) * active * storm_params.x;
+    float dome = sqrt(saturate(cell.x / 0.1)) * active * storm_params.x;
     float tower = 1.0 + 1.4 * dome;
-    float cell_coverage = saturate(coverage + 0.15 * storm);
+    float cell_coverage = saturate(coverage + 0.15 * storm + 0.15 * dome);
     float height_frac = 0;
     //float altitude = distance(worldPos, _SphereCenter) - _SphereMinRadius;
     float altitude = worldPos.y;
@@ -423,7 +441,7 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
     {
         // Towers keep their width a lot further up than cumulus do.
         float column = 1.0 - smoothstep(0.6, 1.0, height_frac);
-        shapeGradient = lerp(shapeGradient, column, dome * 0.85);
+        shapeGradient = lerp(shapeGradient, column, dome);
         // Height in the tallest towers, where the anvil sits.
         cloud_type cu = unpack(cumulus_floats);
         float anvil_frac = (altitude - cu.start_altitude) / (cu.height * (1.0 + 1.4 * storm_params.x));
@@ -434,16 +452,14 @@ float get_density(float3 worldPos, float detail_amount = 1.0, bool bound_only = 
             float billow = _PerlinTex.SampleLevel(sampler_PerlinTex, (worldPos - wind_travel.xyz) / 12000, 0).a;
             if (near_anvil)
             {
-                // The anvil: a flat ceiling over the tallest towers, spread over the whole cell and blown 4.5 km
-                // downwind, so it ends up a lot wider than the tower. Thick next to the tower, thin towards its edges,
-                // with a ragged underside.
-                float2 upwind = storm_cell(worldPos.xz - wind_direction.xy * 4500.0 - wind_travel.xz);
-                float spread = max(cell.x * active, upwind.x * saturate((storm_params.y - upwind.y) * 8.0));
-                float bottom = 0.85 - 0.13 * smoothstep(0.2, 1.0, spread) + 0.2 * (0.68 - billow);
-                float anvil = smoothstep(0.0, 0.3, spread) * storm_params.x * 0.9 *
-                    smoothstep(bottom, bottom + 0.05, anvil_frac) * (1.0 - smoothstep(0.915, 0.93, anvil_frac));
+                // The anvil: a wide flat plate just under the tops of the tallest towers (they poke through it), thin
+                // out to its edges, thicker over the towers, with a ragged underside.
+                float spread = anvil_map.SampleLevel(sampler_linear_repeat, storm_tex_uv, 0);
+                float bottom = 0.88 - 0.16 * smoothstep(0.3, 1.0, spread) + 0.2 * (0.68 - billow);
+                float anvil = smoothstep(0.0, 0.15, spread) * 0.9 *
+                    smoothstep(bottom, bottom + 0.04, anvil_frac) * (1.0 - smoothstep(0.915, 0.93, anvil_frac));
                 shapeGradient = max(shapeGradient, anvil);
-                cell_coverage = max(cell_coverage, saturate(coverage + 0.25 * anvil));
+                cell_coverage = max(cell_coverage, saturate(coverage + 0.3 * anvil));
             }
             shapeGradient *= 1.0 - dome * 0.35 * (1.0 - smoothstep(0.58, 0.78, billow));
         }
@@ -1023,6 +1039,39 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     if (!above_cirrus) add_behind(res, depth_acc, cirrus_layer, cirrus_distance);
     Result[id.xy] = float4(res.rgb, 1.0 - saturate((res.a <= 0.01 ? 0 : res.a)));
     ResultDepth[id.xy] = depth_acc.y > 0.001 ? depth_acc.x / depth_acc.y : 0.0;
+}
+
+// Draws the anvils into anvil_map, over the storm map's 128 km tile (12x12 grid cells). Each one is an ellipse 2.5 times
+// its cell's radius, 1.5 times as long along the wind and moved downwind, so neighbouring anvils overlap, which the
+// cells in the storm map can't. Only the most developed cells have one (anvil_params.x). Runs every frame, the weather
+// and the wind change it.
+[numthreads(8,8,1)]
+void AnvilMap(uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    anvil_map_out.GetDimensions(width, height);
+    if (any(id.xy >= uint2(width, height))) return;
+    float2 p = (id.xy + 0.5) / float2(width, height) * 12.0;
+    int2 grid = (int2)floor(p);
+    float2 along = anvil_params.zw;
+    float2 across = float2(-along.y, along.x);
+    float result = 0.0;
+    // An anvil reaches at most 2.5 * 0.45 * 1.5 + 0.3 * 1.125 grid cells (about 2), so the 5x5 cells around are enough.
+    for (int dy = -2; dy <= 2; dy++)
+    {
+        for (int dx = -2; dx <= 2; dx++)
+        {
+            int2 c = grid + int2(dx, dy);
+            int2 wrapped = (c % 12 + 12) % 12;
+            float4 cell = storm_cells[wrapped.y * 12 + wrapped.x];
+            float activity = saturate((anvil_params.x - cell.w) * 8.0) * anvil_params.y;
+            float r = cell.z * 2.5;
+            float2 q = p - (cell.xy + (float2)(c - wrapped) + along * (r * 0.3));
+            float d = length(float2(dot(q, along) / (r * 1.5), dot(q, across) / r));
+            result = max(result, saturate(1.0 - d) * activity);
+        }
+    }
+    anvil_map_out[id.xy] = result;
 }
 
 // Builds the optical depth volume for the far part of the light cone (samples 3 to 6), from every voxel centre

@@ -292,6 +292,8 @@ public class NoiseController : MonoBehaviour {
 	private float   detailRise;
 
 	private Texture2D stormMap;
+	// The anvils of the most developed storm cells, redrawn every frame by the AnvilMap kernel.
+	private RenderTexture anvilMap;
 	// The storm cells in cell units of the storm map, for putting lightning where the storms are.
 	private Vector2[,] stormCenters;
 	private float[,]   stormValues;
@@ -315,7 +317,7 @@ public class NoiseController : MonoBehaviour {
 	private bool          detailFade = true;
 
 	// Kernel order in VolumetricCompute.compute.
-	internal const int KernelMain = 0, KernelResolve = 1, KernelShadows = 2, KernelLightVolume = 3;
+	internal const int KernelMain = 0, KernelResolve = 1, KernelShadows = 2, KernelLightVolume = 3, KernelAnvil = 4;
 
 
 	#region Caches
@@ -448,6 +450,10 @@ public class NoiseController : MonoBehaviour {
 	private static readonly int CirrusScale                 = Shader.PropertyToID("cirrus_scale");
 	private static readonly int PixelAngle                  = Shader.PropertyToID("pixel_angle");
 	private static readonly int StormMap                    = Shader.PropertyToID("storm_map");
+	private static readonly int AnvilMapID                  = Shader.PropertyToID("anvil_map");
+	private static readonly int AnvilMapOut                 = Shader.PropertyToID("anvil_map_out");
+	private static readonly int StormCells                  = Shader.PropertyToID("storm_cells");
+	private static readonly int AnvilParams                 = Shader.PropertyToID("anvil_params");
 	private static readonly int StormParams                 = Shader.PropertyToID("storm_params");
 	private static readonly int RainParams                  = Shader.PropertyToID("rain_params");
 	private static readonly int RainBase                    = Shader.PropertyToID("rain_base");
@@ -518,7 +524,7 @@ public class NoiseController : MonoBehaviour {
 
 	private void OnDestroy() {
 		ReleaseCloudTextures();
-		foreach (var rt in new[] { perlinRenderTexture, worleyRenderTexture, weatherRenderTexture, shadowRT, lightVolumeRT }) DestroyTexture(rt);
+		foreach (var rt in new[] { perlinRenderTexture, worleyRenderTexture, weatherRenderTexture, shadowRT, lightVolumeRT, anvilMap }) DestroyTexture(rt);
 		if (stormMap) Destroy(stormMap);
 		if (cloudTypes != null) foreach (var v in cloudTypes) v?.Release();
 		if (CumulusLut) Destroy(CumulusLut);
@@ -686,6 +692,7 @@ public class NoiseController : MonoBehaviour {
 
 		foreach (int kernel in new[] { KernelMain, KernelShadows, KernelLightVolume }) {
 			volumetricsShader.SetTexture(kernel, StormMap,   stormMap);
+			volumetricsShader.SetTexture(kernel, AnvilMapID, anvilMap);
 			volumetricsShader.SetTexture(kernel, WeatherMap, weatherRenderTexture);
 			volumetricsShader.SetTexture(kernel, PerlinTex1, perlinRenderTexture);
 			volumetricsShader.SetTexture(kernel, WorleyTex1, worleyRenderTexture);
@@ -735,6 +742,21 @@ public class NoiseController : MonoBehaviour {
 		stormMap.SetPixelData(data, 0);
 		stormMap.Apply(false);
 		Shader.SetGlobalTexture(CloudStormMap, stormMap);
+
+		// The cells for the AnvilMap kernel, which draws the anvils (they reach past their grid cell, so they can't go in
+		// the storm map). x + y * cells, like it reads them.
+		var cellData = new Vector4[cells * cells];
+		for (int y = 0; y < cells; y++)
+			for (int x = 0; x < cells; x++)
+				cellData[y * cells + x] = new Vector4(centers[x, y].x, centers[x, y].y, radii[x, y], values[x, y]);
+		volumetricsShader.SetVectorArray(StormCells, cellData);
+		anvilMap = new RenderTexture(256, 256, 0, RenderTextureFormat.RHalf, RenderTextureReadWrite.Linear) {
+			enableRandomWrite = true,
+			wrapMode          = TextureWrapMode.Repeat,
+			filterMode        = FilterMode.Bilinear,
+		};
+		anvilMap.Create();
+		volumetricsShader.SetTexture(KernelAnvil, AnvilMapOut, anvilMap);
 	}
 
 	// Starts strikes at random (strikesPerMinute on average, or B), and gives the composite the flash and the bolt.
@@ -978,6 +1000,9 @@ public class NoiseController : MonoBehaviour {
 			volumetricsShader.SetVector(MinBounds, cloudBoxMin);
 			volumetricsShader.SetVector(MaxBounds, cloudBoxMax);
 			volumetricsShader.SetVector(StormParams, new Vector4(towers, hasWeather ? weather.stormCells : 0f, 0, 0));
+			// Only the most developed 60% of the active cells have spread an anvil, more and they merge into one deck.
+			volumetricsShader.SetVector(AnvilParams, new Vector4((hasWeather ? weather.stormCells : 0f) * 0.6f, towers, windDir.x, windDir.y));
+			volumetricsShader.Dispatch(KernelAnvil, anvilMap.width / 8, anvilMap.height / 8, 1);
 
 			// Rain: curtains below the cloud base in the raymarch (rain_density), streaks around the camera in the
 			// composite (CloudRain.hlsl). Both use the same weather values.
