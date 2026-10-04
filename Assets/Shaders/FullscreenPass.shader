@@ -195,6 +195,19 @@ Shader "Custom/VolumetricFog"
                     color.rgb = lerp(color.rgb, procedural_sky(toPixel / max(dist, 1e-3)), 1.0 - exp(-dist / _CloudHazeDistance));
                 }
 
+                // Out past the terrain the sky pixels below the horizon stand in for ground at sea level, hazed by its
+                // distance like the real ground above. The skybox's own dark ground showed as a band under the far
+                // clouds when seen from above them.
+                if (isSky && _CloudHazeDistance > 0)
+                {
+                    float3 skyRay = normalize(ComputeWorldSpacePosition(IN.texcoord, depth, UNITY_MATRIX_I_VP) - _WorldSpaceCameraPos);
+                    if (skyRay.y < 0)
+                    {
+                        float groundDistance = max(_WorldSpaceCameraPos.y, 1.0) / -skyRay.y;
+                        color.rgb = lerp(color.rgb, procedural_sky(skyRay), 1.0 - exp(-groundDistance / _CloudHazeDistance));
+                    }
+                }
+
                 // The clouds are premultiplied, so only the scene behind them gets dimmed.
                 float cloudAlpha = saturate(fogData.a);
                 float3 result = color.rgb * (1.0 - cloudAlpha) + fogData.rgb;

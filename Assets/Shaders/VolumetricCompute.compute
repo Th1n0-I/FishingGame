@@ -750,6 +750,8 @@ float4 raymarch(float3 startPoint, float3 endPoint, float3 camPoint, float3 fogC
         // The air in front of far samples gives them the sky's colour, so the horizon fills up with hazy clouds
         // instead of turning see-through (which showed the dark ground from above the clouds).
         float haze = 1.0 - exp(-cam_distance / max(horizon_fade, 1.0));
+        // Fully hazed by the draw distance, so seen from above the clouds don't end in a line there.
+        haze = max(haze, smoothstep(0.6 * _SphereMaxRadius, _SphereMaxRadius, cam_distance));
         float step_opacity = 1.0 - exp(-density * step_size);
         // Average distance weighted by how much each step shows up in the final pixel.
         depth_acc += float2(cam_distance, 1.0) * (transmittance * step_opacity);
@@ -868,8 +870,8 @@ float4 cirrus(float3 cam, float3 ray_dir, float view_length, out float distance_
     // Thin enough that nothing shadows it, so it gets the light the cloud layer gets at its edges.
     float cos_theta = dot(ray_dir, -_LightDirection.xyz);
     float3 color = cloud_light_color() * scattered_light(0.0, cos_theta) + cloud_ambient_color();
-    // Same air as for the cloud layer between the camera and the sheet.
-    color = lerp(color, procedural_sky(ray_dir), 1.0 - exp(-t / max(horizon_fade, 1.0)));
+    // Same air as for the cloud layer between the camera and the sheet, fully hazed by its 300 km edge.
+    color = lerp(color, procedural_sky(ray_dir), max(1.0 - exp(-t / max(horizon_fade, 1.0)), smoothstep(180000.0, 300000.0, t)));
     return float4(color * opacity, opacity);
 }
 
