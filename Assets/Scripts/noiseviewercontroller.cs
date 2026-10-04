@@ -63,12 +63,17 @@ public class noiseviewercontroller : MonoBehaviour {
 			if (newTex.dimension == TextureDimension.Tex3D) {
 				image.material = sliceMat;
 				sliceMat.SetTexture("_Volume", newTex);
+				sliceMat.SetFloat("_UseFlat", 0);
 
 				image.texture = null;
 			} else {
-				image.material = null;
+				// Through the slice material too, which shows it without its alpha. The weather map's alpha holds the
+				// cirrus wisps, which made the preview see-through.
+				image.material = sliceMat;
+				sliceMat.SetTexture("_Flat", newTex);
+				sliceMat.SetFloat("_UseFlat", 1);
 
-				image.texture = newTex;
+				image.texture = null;
 			}
 			image.SetAllDirty();
 		}

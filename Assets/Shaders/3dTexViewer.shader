@@ -4,6 +4,9 @@ Shader "UI/Texture3DSlice"
         _Volume ("Volume", 3D) = "" {}
         _Slice  ("Slice", Range(0,1)) = 0.5
         _Channel ("Channel", Int) = 0
+        // A 2D texture instead of the volume, shown without its alpha (Use Flat = 1).
+        _Flat ("Flat", 2D) = "black" {}
+        _UseFlat ("Use Flat", Float) = 0
         [HideInInspector] _MainTex ("Sprite Texture", 2D) = "white" {}
     }
     SubShader {
@@ -19,12 +22,15 @@ Shader "UI/Texture3DSlice"
             #pragma fragment frag
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             TEXTURE3D(_Volume); SAMPLER(sampler_Volume);
+            TEXTURE2D(_Flat); SAMPLER(sampler_Flat);
+            float _UseFlat;
             float _Slice;
             int _Channel;
             struct A { float4 vertex:POSITION; float2 uv:TEXCOORD0; float4 color:COLOR; };
             struct V { float4 vertex:SV_POSITION; float2 uv:TEXCOORD0; float4 color:COLOR; };
             V vert(A v){ V o; o.vertex=TransformObjectToHClip(v.vertex.xyz); o.uv=v.uv; o.color=v.color; return o; }
             half4 frag(V i):SV_Target {
+                if (_UseFlat > 0.5) return half4(SAMPLE_TEXTURE2D(_Flat, sampler_Flat, i.uv).rgb, 1) * i.color;
                 float val;
 
                 if (_Channel == 0)
